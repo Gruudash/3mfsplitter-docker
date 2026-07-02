@@ -563,6 +563,89 @@ function splitConnectedComponents(faces) {
   return Array.from(groups.values());
 }
 
+// Same-color islands whose cut boundaries are within this distance (mm) of
+// each other are just cut-artifact fragments of one physical piece and get
+// merged back together; islands genuinely farther apart (e.g. two separate
+// same-color legs) stay distinct parts. Mirrors the backend's
+// DEFAULT_MERGE_GAP_MM so the viewer's part count roughly matches the
+// actual export.
+const VIEWER_MERGE_GAP_MM = 2.0;
+
+// Representative points for a proximity check: an island's open-boundary
+// vertices (that's where it could be touching a neighbour fragment) or, if
+// it has none, a sample of all its vertices. Capped for performance.
+function representativePoints(vertices, faces, cap = 80) {
+  const edgeCnt = new Map();
+  const bump = (x, y) => { const k = x < y ? x + '_' + y : y + '_' + x; edgeCnt.set(k, (edgeCnt.get(k) || 0) + 1); };
+  for (const [a, b, c] of faces) { bump(a, b); bump(b, c); bump(c, a); }
+
+  const boundary = new Set();
+  for (const [a, b, c] of faces) {
+    for (const [x, y] of [[a, b], [b, c], [c, a]]) {
+      const k = x < y ? x + '_' + y : y + '_' + x;
+      if (edgeCnt.get(k) === 1) { boundary.add(x); boundary.add(y); }
+    }
+  }
+  let idx = boundary.size ? Array.from(boundary) : Array.from(new Set(faces.flat()));
+  if (idx.length > cap) {
+    const step = idx.length / cap;
+    idx = Array.from({ length: cap }, (_, i) => idx[Math.floor(i * step)]);
+  }
+  return idx.map(i => vertices[i]);
+}
+
+function pointsBBox(pts) {
+  const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+  for (const p of pts) for (let i = 0; i < 3; i++) { if (p[i] < min[i]) min[i] = p[i]; if (p[i] > max[i]) max[i] = p[i]; }
+  return { min, max };
+}
+
+function bboxGap(a, b) {
+  let sq = 0;
+  for (let i = 0; i < 3; i++) { const g = Math.max(0, Math.max(a.min[i] - b.max[i], b.min[i] - a.max[i])); sq += g * g; }
+  return Math.sqrt(sq);
+}
+
+function minPointDistance(ptsA, ptsB) {
+  let best = Infinity;
+  for (const a of ptsA) for (const b of ptsB) {
+    const dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
+    const d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 < best) best = d2;
+  }
+  return Math.sqrt(best);
+}
+
+// Merges islands of one color whose boundaries are within VIEWER_MERGE_GAP_MM
+// of each other (union-find). A cheap bounding-box pre-filter skips the
+// expensive point-to-point check for pairs that are obviously far apart.
+function mergeNearbyIslands(vertices, islands) {
+  const n = islands.length;
+  if (n <= 1) return islands;
+
+  const pointSets = islands.map(faces => representativePoints(vertices, faces));
+  const boxes = pointSets.map(pointsBBox);
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const find = x => parent[x] === x ? x : (parent[x] = find(parent[x]));
+  const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[ra] = rb; };
+
+  const prefilterMargin = VIEWER_MERGE_GAP_MM * 3;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (bboxGap(boxes[i], boxes[j]) > prefilterMargin) continue;
+      if (minPointDistance(pointSets[i], pointSets[j]) <= VIEWER_MERGE_GAP_MM) union(i, j);
+    }
+  }
+
+  const groups = new Map();
+  for (let i = 0; i < n; i++) {
+    const root = find(i);
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root).push(...islands[i]);
+  }
+  return Array.from(groups.values());
+}
+
 // ── Main parser ──────────────────────────────────────────────────────────
 
 async function parse3mf(file) {
@@ -677,7 +760,8 @@ async function parse3mf(file) {
       // legs show up -- and stay individually clickable -- as two parts
       // in the viewer instead of one merged, ambiguous selection target.
       for (const [hex, group] of Object.entries(colorFaces)) {
-        const islands = splitConnectedComponents(group.faces);
+        const rawIslands = splitConnectedComponents(group.faces);
+        const islands = mergeNearbyIslands(verts, rawIslands);
         islands.forEach((islandFaces, i) => {
           const suffix = i === 0 ? '' : `_${i + 1}`;
           parts.push({ name: `${objName}_${hex}${suffix}`, displayName: objName,
