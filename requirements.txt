@@ -6,6 +6,6 @@ Pillow==12.3.0
 fastapi==0.139.0
 uvicorn[standard]==0.49.0
 python-multipart==0.0.32
-aiofiles==25.1.0
+aiofiles==v25.1.0
 shapely==2.1.2
 pymeshfix==0.18.1
