@@ -953,37 +953,40 @@ window.toggleWireframe = function() {
 };
 
 // ── Place on plate (face selection) ─────────────────────────────────
-// Arms/disarms face-pick mode: while armed, clicking a face on the
-// isolated part rotates the part so that face is flush with the grid
-// (like a slicer's "place on face"), then drops it to touch the grid.
+// Arms/disarms face-pick mode: while armed, clicking a face rotates the
+// isolated part -- or, if nothing is isolated, the whole assembled model
+// -- so that face is flush with the grid (like a slicer's "place on
+// face"), then drops it to touch the grid. Viewer-only: it does not
+// change the geometry the backend /api/split works from.
 window.toggleFacePick = function() {
-  if (isolatedIdx === null) {
-    setStatus('Bitte zuerst ein Teil anklicken, um es zu isolieren', 'err');
+  if (isolatedIdx === null && !(assembledMesh && assembledMesh.visible)) {
+    setStatus('Bitte ein Teil isolieren oder die zusammengesetzte Ansicht anzeigen', 'err');
     return;
   }
   facePickArmed = !facePickArmed;
   document.getElementById('btn-plate').classList.toggle('active', facePickArmed);
   document.getElementById('viewport').classList.toggle('face-pick-cursor', facePickArmed);
-  setStatus(facePickArmed ? 'Klicke auf eine Fläche des Teils …' : '', facePickArmed ? 'busy' : 'ok');
+  setStatus(facePickArmed ? 'Klicke auf eine Fläche …' : '', facePickArmed ? 'busy' : 'ok');
 };
 
-// Re-centers geometry on its own bounding-box center so subsequent
-// rotations pivot around the object itself, not the model's original
-// (possibly far-away) coordinate origin baked into its vertex data.
-function centerMeshPivot(mesh) {
-  mesh.geometry.computeBoundingBox();
-  const localCenter = new THREE.Vector3();
-  mesh.geometry.boundingBox.getCenter(localCenter);
-  if (localCenter.lengthSq() > 1e-6) {
-    mesh.geometry.translate(-localCenter.x, -localCenter.y, -localCenter.z);
-    mesh.position.add(localCenter.applyQuaternion(mesh.quaternion));
-  }
+// Rotates *object* around an arbitrary WORLD-space pivot (its own local
+// origin may be far from where it visually sits, e.g. the whole
+// modelGroup, or a part mesh whose vertices keep their original
+// model-space coordinates) without touching any geometry.
+function rotateAroundWorldPivot(object, pivotWorld, quat) {
+  const localPivot = object.parent ? object.parent.worldToLocal(pivotWorld.clone()) : pivotWorld.clone();
+  const rel = object.position.clone().sub(localPivot).applyQuaternion(quat);
+  object.position.copy(rel.add(localPivot));
+  object.quaternion.premultiply(quat);
 }
 
 function handleFacePick(event) {
-  const idx = isolatedIdx;
-  if (idx === null) return;
-  const mesh = partMeshes[idx].mesh;
+  // Click target for raycasting: the isolated part, or the assembled
+  // mesh representing the whole model. Rotation target: that same part,
+  // or modelGroup (so every part rotates together with the assembly).
+  const pickMesh     = isolatedIdx !== null ? partMeshes[isolatedIdx].mesh : assembledMesh;
+  const rotateTarget = isolatedIdx !== null ? pickMesh : modelGroup;
+  if (!pickMesh) return;
 
   const rect = renderer.domElement.getBoundingClientRect();
   const ndc = new THREE.Vector2(
@@ -992,20 +995,21 @@ function handleFacePick(event) {
   );
   const raycaster = new THREE.Raycaster();
   raycaster.setFromCamera(ndc, camera);
-  const hits = raycaster.intersectObject(mesh, false);
+  const hits = raycaster.intersectObject(pickMesh, false);
   if (!hits.length) return;
 
-  centerMeshPivot(mesh);
-  mesh.updateMatrixWorld(true);
-
   const worldNormal = hits[0].face.normal.clone()
-    .transformDirection(mesh.matrixWorld).normalize();
+    .transformDirection(pickMesh.matrixWorld).normalize();
   const down = new THREE.Vector3(0, -1, 0);
   const rot = new THREE.Quaternion().setFromUnitVectors(worldNormal, down);
-  mesh.quaternion.premultiply(rot);
 
-  const box = new THREE.Box3().setFromObject(mesh);
-  mesh.position.y -= box.min.y;
+  const pivotBox = new THREE.Box3().setFromObject(rotateTarget);
+  const pivotWorld = new THREE.Vector3();
+  pivotBox.getCenter(pivotWorld);
+  rotateAroundWorldPivot(rotateTarget, pivotWorld, rot);
+
+  const box = new THREE.Box3().setFromObject(rotateTarget);
+  rotateTarget.position.y -= box.min.y;
 
   facePickArmed = false;
   document.getElementById('btn-plate').classList.remove('active');
