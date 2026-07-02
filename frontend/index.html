@@ -1119,6 +1119,14 @@ window.doSplit = async function() {
     fd.append('connector', connector);
     fd.append('n_connectors', nConnectors);
     collectConnParams(fd, connector);
+    // Whole-model orientation chosen in the viewer via "place on plate"
+    // (identity quaternion if the user never used that tool -> no-op server-side)
+    if (modelGroup) {
+      fd.append('rot_x', modelGroup.quaternion.x);
+      fd.append('rot_y', modelGroup.quaternion.y);
+      fd.append('rot_z', modelGroup.quaternion.z);
+      fd.append('rot_w', modelGroup.quaternion.w);
+    }
 
     const r = await fetch('/api/split', { method: 'POST', body: fd });
     if (!r.ok) {

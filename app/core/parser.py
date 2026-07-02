@@ -396,3 +396,25 @@ def parse_3mf(path: str) -> List[MeshData]:
             md.face_colors[:] = color
 
     return all_results
+
+
+def apply_rotation(mesh_list: List[MeshData], quat_xyzw: Tuple[float, float, float, float]) -> None:
+    """Rotate every MeshData's vertices in place around the shared bounding-box
+    center of the whole model, using an (x, y, z, w) quaternion.
+
+    Mirrors the frontend's "place on plate" tool, which lets the user pick a
+    face of the assembled model to orient it before splitting -- so the
+    orientation chosen in the viewer is reflected in the exported parts.
+    """
+    x, y, z, w = quat_xyzw
+    if abs(x) < 1e-9 and abs(y) < 1e-9 and abs(z) < 1e-9 and abs(w - 1.0) < 1e-9:
+        return  # identity quaternion, nothing to do
+
+    from scipy.spatial.transform import Rotation
+
+    all_verts = np.concatenate([md.vertices for md in mesh_list], axis=0)
+    center = (all_verts.min(axis=0) + all_verts.max(axis=0)) / 2.0
+
+    rot = Rotation.from_quat([x, y, z, w])
+    for md in mesh_list:
+        md.vertices = (rot.apply(md.vertices.astype(np.float64) - center) + center).astype(np.float32)

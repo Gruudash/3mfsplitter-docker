@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 
 from ..core.connectors import ConnectorType, apply_connectors
 from ..core.exporter import export_parts_as_zip
-from ..core.parser import parse_3mf
+from ..core.parser import apply_rotation, parse_3mf
 from ..core.splitter import DEFAULT_MERGE_GAP_MM, split_by_color
 
 router = APIRouter()
@@ -80,6 +80,11 @@ async def split(
     dt_depth: float = Form(5.0),
     dt_draft_deg: float = Form(12.0),
     dt_clearance: float = Form(0.2),
+    # Whole-model orientation chosen via the viewer's "place on plate" tool
+    rot_x: float = Form(0.0),
+    rot_y: float = Form(0.0),
+    rot_z: float = Form(0.0),
+    rot_w: float = Form(1.0),
 ):
     """Split a .3mf file by face color and return a ZIP of STL parts."""
     _require_3mf(file.filename)
@@ -108,6 +113,8 @@ async def split(
 
     if not mesh_list:
         raise HTTPException(400, "No mesh objects found in the file")
+
+    apply_rotation(mesh_list, (rot_x, rot_y, rot_z, rot_w))
 
     all_parts = []
     for md in mesh_list:
