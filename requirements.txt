@@ -1,11 +1,11 @@
-trimesh[easy]==4.4.9
-numpy==2.2.2
-manifold3d==3.0.1
-scipy==1.15.0
+trimesh[easy]==4.12.2
+numpy==2.4.0
+manifold3d==3.5.2
+scipy==1.18.0
 Pillow==12.3.0
-fastapi==0.115.11
+fastapi==0.139.0
 uvicorn[standard]==0.49.0
 python-multipart==0.0.32
 aiofiles==25.1.0
-shapely==2.0.7
+shapely==2.1.2
 pymeshfix==0.18.1
