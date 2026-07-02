@@ -168,6 +168,7 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg);
   <button class="tb-btn" id="btn-wire" onclick="toggleWireframe()" title="Wireframe">Wireframe</button>
   <button class="tb-btn" id="btn-fit"  onclick="fitCamera()"        title="Kamera einpassen">Einpassen</button>
   <button class="tb-btn"               onclick="resetCamera()"       title="Kamera reset">Reset</button>
+  <button class="tb-btn" id="btn-plate" onclick="placeOnPlate()"     title="Isoliertes Teil auf die Platte (Grid) absenken">⬇ Auf Platte</button>
 </div>
 
 <!-- ── Main ── -->
@@ -935,6 +936,21 @@ window.toggleWireframe = function() {
   if (assembledMesh) assembledMesh.material.wireframe = isWireframe;
   for (const p of partMeshes) p.mesh.material.wireframe = isWireframe;
   document.getElementById('btn-wire').classList.toggle('active', isWireframe);
+};
+
+// Drop the currently isolated part straight down (no rotation) until its
+// lowest point touches the grid -- like a slicer's "place on plate", so an
+// individually inspected part doesn't sit floating at its original height
+// from the assembled model's coordinate frame.
+window.placeOnPlate = function() {
+  if (isolatedIdx === null) {
+    setStatus('Bitte zuerst ein Teil anklicken, um es zu isolieren', 'err');
+    return;
+  }
+  const mesh = partMeshes[isolatedIdx].mesh;
+  const box = new THREE.Box3().setFromObject(mesh);
+  mesh.position.y -= box.min.y;
+  fitCamera();
 };
 
 // ── Split / Explode ──────────────────────────────────────────────
