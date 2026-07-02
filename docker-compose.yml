@@ -26,7 +26,7 @@ services:
       # App dann unter http://localhost:8080 zu erreichen. Die rechte 8000
       # NICHT ändern, außer EXPOSE/CMD im Dockerfile und der uvicorn
       # --port-Parameter dort werden ebenfalls angepasst.
-      - "8822:8000"
+      - "8899:8000"
 
     volumes:
       # ANPASSEN: wo hochgeladene .3mf-Dateien / exportierte STL-ZIPs auf
