@@ -285,6 +285,7 @@ let isWireframe   = false;
 let selectedFile  = null;
 let explodeFactor = 0;
 let facePickArmed = false;
+let faceHighlight = null;
 
 // ── Three.js setup ───────────────────────────────────────────────
 function initThree() {
@@ -324,6 +325,24 @@ function initThree() {
     if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) return; // was a drag
     handleFacePick(e);
   });
+  renderer.domElement.addEventListener('pointermove', e => {
+    if (facePickArmed) updateFaceHighlight(e);
+  });
+  renderer.domElement.addEventListener('pointerleave', () => setFaceHighlightVisible(false));
+
+  // Single-triangle overlay that snaps onto whichever face the cursor is
+  // hovering over during face-pick mode, so the user sees which face will
+  // land on the plate before committing to the click.
+  faceHighlight = new THREE.Mesh(
+    new THREE.BufferGeometry(),
+    new THREE.MeshBasicMaterial({
+      color: 0xffb300, transparent: true, opacity: 0.55,
+      side: THREE.DoubleSide, depthTest: false,
+    })
+  );
+  faceHighlight.renderOrder = 999;
+  faceHighlight.visible = false;
+  scene.add(faceHighlight);
 
   // Lights
   const amb = new THREE.AmbientLight(0xffffff, 0.70);
@@ -966,6 +985,7 @@ window.toggleFacePick = function() {
   facePickArmed = !facePickArmed;
   document.getElementById('btn-plate').classList.toggle('active', facePickArmed);
   document.getElementById('viewport').classList.toggle('face-pick-cursor', facePickArmed);
+  if (!facePickArmed) setFaceHighlightVisible(false);
   setStatus(facePickArmed ? 'Klicke auf eine Fläche …' : '', facePickArmed ? 'busy' : 'ok');
 };
 
@@ -980,11 +1000,60 @@ function rotateAroundWorldPivot(object, pivotWorld, quat) {
   object.quaternion.premultiply(quat);
 }
 
+function currentPickMesh() {
+  return isolatedIdx !== null ? partMeshes[isolatedIdx].mesh : assembledMesh;
+}
+
+function setFaceHighlightVisible(visible) {
+  if (faceHighlight) faceHighlight.visible = visible;
+}
+
+// Overlays the face under the cursor with a highlight triangle, offset
+// slightly along its normal so it doesn't z-fight with the surface.
+function updateFaceHighlight(event) {
+  const pickMesh = currentPickMesh();
+  if (!pickMesh) { setFaceHighlightVisible(false); return; }
+
+  const rect = renderer.domElement.getBoundingClientRect();
+  const ndc = new THREE.Vector2(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1
+  );
+  const raycaster = new THREE.Raycaster();
+  raycaster.setFromCamera(ndc, camera);
+  const hits = raycaster.intersectObject(pickMesh, false);
+  if (!hits.length) { setFaceHighlightVisible(false); return; }
+
+  const hit = hits[0];
+  const pos = pickMesh.geometry.attributes.position;
+  const idx = pickMesh.geometry.index;
+  const ia = idx ? idx.getX(hit.faceIndex * 3)     : hit.face.a;
+  const ib = idx ? idx.getX(hit.faceIndex * 3 + 1) : hit.face.b;
+  const ic = idx ? idx.getX(hit.faceIndex * 3 + 2) : hit.face.c;
+
+  const verts = [ia, ib, ic].map(i => {
+    const v = new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i));
+    return pickMesh.localToWorld(v);
+  });
+  const normal = hit.face.normal.clone().transformDirection(pickMesh.matrixWorld).normalize();
+  const nudge = normal.multiplyScalar(0.15); // avoid z-fighting with the surface
+  verts.forEach(v => v.add(nudge));
+
+  const positions = new Float32Array([
+    verts[0].x, verts[0].y, verts[0].z,
+    verts[1].x, verts[1].y, verts[1].z,
+    verts[2].x, verts[2].y, verts[2].z,
+  ]);
+  faceHighlight.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  faceHighlight.geometry.computeVertexNormals();
+  setFaceHighlightVisible(true);
+}
+
 function handleFacePick(event) {
   // Click target for raycasting: the isolated part, or the assembled
   // mesh representing the whole model. Rotation target: that same part,
   // or modelGroup (so every part rotates together with the assembly).
-  const pickMesh     = isolatedIdx !== null ? partMeshes[isolatedIdx].mesh : assembledMesh;
+  const pickMesh     = currentPickMesh();
   const rotateTarget = isolatedIdx !== null ? pickMesh : modelGroup;
   if (!pickMesh) return;
 
@@ -1014,6 +1083,7 @@ function handleFacePick(event) {
   facePickArmed = false;
   document.getElementById('btn-plate').classList.remove('active');
   document.getElementById('viewport').classList.remove('face-pick-cursor');
+  setFaceHighlightVisible(false);
   fitCamera();
   setStatus('Fläche auf die Platte gelegt', 'ok');
 }
