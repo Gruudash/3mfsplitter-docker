@@ -1,0 +1,78 @@
+# 3MF Splitter -- Docker-Compose-Konfiguration
+#
+# Schnellstart:
+#   docker compose up --build
+#   -> danach http://localhost:8000 öffnen
+#
+# Alles, was unten mit "ANPASSEN" markiert ist, kann/darf bei einer
+# Installation geändert werden. Der Rest kann normalerweise so bleiben.
+
+services:
+  splitter:
+    # Baut das Image aus dem Dockerfile in diesem Ordner. Falls stattdessen
+    # ein fertiges Image aus einer Registry verwendet werden soll, diese
+    # ganze "build:"-Zeile ersetzen durch z.B.
+    # "image: dein-registry/3mf-splitter:latest"
+    build: .
+
+    # ANPASSEN: Container-/Image-Name, der bei `docker ps` angezeigt wird.
+    # Optional, aber hilfreich, wenn mehrere Instanzen/Container auf
+    # demselben Host laufen.
+    # container_name: 3mf-splitter
+
+    ports:
+      # ANPASSEN: "HOST_PORT:CONTAINER_PORT". Die LINKE Zahl ändern, falls
+      # Port 8000 auf dem Host bereits belegt ist, z.B. "8080:8000", um die
+      # App dann unter http://localhost:8080 zu erreichen. Die rechte 8000
+      # NICHT ändern, außer EXPOSE/CMD im Dockerfile und der uvicorn
+      # --port-Parameter dort werden ebenfalls angepasst.
+      - "8000:8000"
+
+    volumes:
+      # ANPASSEN: wo hochgeladene .3mf-Dateien / exportierte STL-ZIPs auf
+      # dem HOST abgelegt werden (linke Seite des Doppelpunkts). Ändern,
+      # falls die Daten nicht neben dieser Compose-Datei liegen sollen,
+      # z.B. "/mnt/data/3mf-splitter/uploads:/app/uploads". Die RECHTE
+      # Seite (/app/uploads, /app/output) muss zu den Pfaden im Code
+      # passen (app/api/routes.py) -- nicht ändern, ohne auch den Code
+      # anzupassen.
+      - ./uploads:/app/uploads
+      - ./output:/app/output
+
+    environment:
+      # Sorgt dafür, dass Python stdout/stderr ungepuffert ausgibt, damit
+      # `docker compose logs` sofort etwas anzeigt. In der Regel so lassen.
+      - PYTHONUNBUFFERED=1
+      # ANPASSEN (optional): die App hat aktuell keine weiteren
+      # konfigurierbaren Umgebungsvariablen (Port/Host sind fest im CMD
+      # des Dockerfiles). Falls später Konfiguration über Env-Variablen
+      # in app/main.py ergänzt wird (z.B. API-Key, CORS-Origins,
+      # Upload-Größenlimit), hier eintragen, Beispiel:
+      # - MAX_UPLOAD_MB=200
+      # - CORS_ALLOW_ORIGINS=https://example.com
+
+    # ANPASSEN: Neustart-Verhalten. "unless-stopped" startet den Container
+    # nach einem Absturz oder Host-Neustart automatisch neu, aber nicht
+    # nach einem manuellen Stopp. "always" startet auch nach manuellem
+    # Stopp neu, "no" beim Debuggen, damit Fehler nicht endlos neu starten.
+    restart: unless-stopped
+
+    healthcheck:
+      # Prüft GET /api/health im Container. So lassen, außer der
+      # Health-Endpunkt in app/api/routes.py wird umbenannt.
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+    # ANPASSEN (optional): einkommentieren und anpassen, um CPU/RAM zu
+    # begrenzen, falls dieser Dienst zusammen mit anderen auf einem
+    # gemeinsam genutzten Host läuft. Boolesche Mesh-Operationen
+    # (Magnet-/Steg-/Schwalbenschwanz-Verbinder) bei großen Multicolor-
+    # Modellen können CPU- und speicherintensiv sein -- Werte nicht zu
+    # niedrig ansetzen.
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: "2.0"
+    #       memory: 4G

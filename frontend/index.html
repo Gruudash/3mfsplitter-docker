@@ -1,0 +1,1109 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3MF Splitter</title>
+<style>
+:root {
+  --bg:      #0d0f1a;
+  --panel:   #141722;
+  --surface: #1c1f2e;
+  --border:  #262a3e;
+  --accent:  #6c63ff;
+  --text:    #e2e8f0;
+  --muted:   #6b7280;
+  --success: #48bb78;
+  --error:   #fc8181;
+  --warn:    #f6ad55;
+  --r:       8px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg); color: var(--text);
+  font-family: 'Inter', system-ui, sans-serif; font-size: 13px; }
+
+/* ── Layout ────────────────────────────────── */
+#app { display: flex; flex-direction: column; height: 100vh; }
+
+#topbar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 16px; height: 44px; flex-shrink: 0;
+  background: var(--panel); border-bottom: 1px solid var(--border);
+}
+#topbar h1 { font-size: 15px; font-weight: 700; letter-spacing: -.3px; flex: 1; }
+#topbar h1 span { color: var(--accent); }
+
+.tb-btn {
+  padding: 4px 11px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text); cursor: pointer; font-size: 12px;
+  transition: background .15s, border-color .15s;
+}
+.tb-btn:hover { background: var(--border); }
+.tb-btn.active { border-color: var(--accent); color: var(--accent); }
+
+#main { display: flex; flex: 1; min-height: 0; }
+
+/* ── Left sidebar ───────────────────────────── */
+#sidebar {
+  width: 232px; flex-shrink: 0;
+  background: var(--panel); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+
+.sb-section { padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.sb-label { font-size: 10px; font-weight: 700; text-transform: uppercase;
+            letter-spacing: .08em; color: var(--muted); margin-bottom: 8px; }
+
+/* Drop zone */
+#dropzone {
+  border: 1.5px dashed var(--border); border-radius: var(--r);
+  padding: 16px 12px; text-align: center; cursor: pointer;
+  position: relative; transition: border-color .2s, background .2s;
+}
+#dropzone:hover, #dropzone.over { border-color: var(--accent); background: rgba(108,99,255,.06); }
+#dropzone input { position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%; }
+#drop-icon { font-size: 1.6rem; }
+#drop-hint { color: var(--muted); font-size: 11px; margin-top: 4px; }
+#file-tag  { display:none; margin-top:6px; color:var(--accent); font-size:11px; font-weight:600; word-break:break-all; }
+
+/* Parts list */
+#parts-list { flex: 1; overflow-y: auto; padding: 8px 0; min-height: 60px; }
+.part-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 14px; cursor: pointer; border-radius: 0;
+  transition: background .12s;
+}
+.part-row:hover { background: var(--surface); }
+.part-row.hidden-part { opacity: .35; }
+.color-swatch { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
+.part-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.part-hex   { font-size: 10px; color: var(--muted); font-family: monospace; }
+.eye-btn    { color: var(--muted); font-size: 13px; padding: 2px; cursor: pointer;
+              transition: color .15s; line-height: 1; }
+.eye-btn:hover { color: var(--text); }
+
+/* Options */
+.radio-group { display: flex; flex-direction: column; gap: 5px; }
+.radio-row { display: flex; align-items: center; gap: 7px; cursor: pointer; padding: 2px 0; }
+.radio-row input { accent-color: var(--accent); }
+.radio-row span  { font-size: 12px; }
+
+.field-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.field-row label { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.field-row input  { width: 56px; background: var(--surface); border: 1px solid var(--border);
+                    border-radius: 6px; color: var(--text); padding: 4px 8px; font-size: 12px;
+                    outline: none; }
+.field-row input:focus { border-color: var(--accent); }
+
+/* Status / download */
+#sb-bottom { padding: 12px 14px; border-top: 1px solid var(--border); flex-shrink: 0; }
+#dl-btn {
+  width: 100%; padding: 9px; border: none; border-radius: var(--r);
+  background: var(--accent); color: #fff; font-size: 13px; font-weight: 600;
+  cursor: pointer; transition: opacity .15s, transform .1s; margin-bottom: 8px;
+}
+#dl-btn:disabled { opacity: .4; cursor: default; }
+#dl-btn:not(:disabled):active { transform: scale(.97); }
+
+#status-bar { font-size: 11px; color: var(--muted); min-height: 16px; display: flex;
+              align-items: center; gap: 6px; }
+#status-bar.ok   { color: var(--success); }
+#status-bar.err  { color: var(--error); }
+#status-bar.busy { color: var(--warn); }
+
+/* Progress */
+#progress { height: 3px; background: var(--border); border-radius: 3px; margin-top: 6px; overflow: hidden; }
+#progress-bar { height: 100%; background: var(--accent); width: 0; transition: width .3s; }
+
+/* ── 3D Viewport ───────────────────────────── */
+#viewport { flex: 1; position: relative; overflow: hidden; }
+#viewport canvas { display: block; }
+
+#vp-toolbar {
+  position: absolute; top: 12px; right: 12px;
+  display: flex; gap: 6px;
+}
+
+#vp-info {
+  position: absolute; bottom: 12px; left: 12px;
+  font-size: 11px; color: var(--muted);
+  background: rgba(13,15,26,.75); padding: 5px 9px; border-radius: 6px;
+  pointer-events: none;
+}
+
+#empty-hint {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; color: var(--muted);
+  gap: 10px; pointer-events: none;
+}
+#empty-hint .big { font-size: 3rem; }
+#empty-hint p { font-size: 13px; }
+
+/* Explode slider */
+#explode-wrap { position: absolute; bottom: 12px; right: 12px;
+                display: flex; align-items: center; gap: 8px;
+                background: rgba(13,15,26,.75); padding: 6px 10px; border-radius: 8px;
+                font-size: 11px; color: var(--muted); }
+#explode-wrap input { width: 80px; accent-color: var(--accent); }
+
+.conn-params { margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
+.params-title { font-size: 10px; font-weight: 700; text-transform: uppercase;
+                letter-spacing: .08em; color: var(--muted); margin-bottom: 6px; }
+.conn-params .field-row { margin-top: 5px; }
+.conn-params .field-row label { min-width: 74px; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+</style>
+</head>
+<body>
+<div id="app">
+
+<!-- ── Top bar ── -->
+<div id="topbar">
+  <h1>3MF <span>Splitter</span></h1>
+  <button class="tb-btn" id="btn-split" onclick="toggleSplitView()" title="Zusammengesetzt / Geteilt">◫ Geteilt</button>
+  <button class="tb-btn" id="btn-wire" onclick="toggleWireframe()" title="Wireframe">Wireframe</button>
+  <button class="tb-btn" id="btn-fit"  onclick="fitCamera()"        title="Kamera einpassen">Einpassen</button>
+  <button class="tb-btn"               onclick="resetCamera()"       title="Kamera reset">Reset</button>
+</div>
+
+<!-- ── Main ── -->
+<div id="main">
+
+  <!-- Left sidebar -->
+  <div id="sidebar">
+
+    <!-- File drop -->
+    <div class="sb-section">
+      <div class="sb-label">Datei</div>
+      <div id="dropzone">
+        <input type="file" id="file-input" accept=".3mf">
+        <div id="drop-icon">📂</div>
+        <div id="drop-hint">.3mf Datei öffnen</div>
+        <div id="file-tag"></div>
+      </div>
+    </div>
+
+    <!-- Parts -->
+    <div class="sb-section" style="flex:1;display:flex;flex-direction:column;min-height:0;overflow:hidden;">
+      <div class="sb-label">Farbteile <span id="part-count" style="color:var(--accent)"></span></div>
+      <div id="parts-list"></div>
+    </div>
+
+    <!-- Connector options -->
+    <div class="sb-section">
+      <div class="sb-label">Verbindungstyp</div>
+      <div class="radio-group">
+        <label class="radio-row"><input type="radio" name="conn" value="none"     checked onchange="updateConnParams()"> <span>Keiner</span></label>
+        <label class="radio-row"><input type="radio" name="conn" value="magnet"         onchange="updateConnParams()"> <span>🧲 Magnet-Löcher</span></label>
+        <label class="radio-row"><input type="radio" name="conn" value="peg"            onchange="updateConnParams()"> <span>⬆ Steg / Zapfen</span></label>
+        <label class="radio-row"><input type="radio" name="conn" value="dovetail"       onchange="updateConnParams()"> <span>◈ Schwalbenschwanz</span></label>
+      </div>
+      <div class="field-row">
+        <label>Anzahl</label>
+        <input type="number" id="n-conn" value="3" min="1" max="10">
+      </div>
+
+      <!-- Magnet parameters -->
+      <div id="params-magnet" class="conn-params" style="display:none">
+        <div class="params-title">Magnet-Parameter</div>
+        <div class="field-row"><label>Radius (mm)</label>  <input type="number" id="magnet-radius"  value="2.6" min="0.5" max="20"  step="0.1"></div>
+        <div class="field-row"><label>Tiefe (mm)</label>   <input type="number" id="magnet-depth"   value="3.2" min="0.5" max="20"  step="0.1"></div>
+      </div>
+
+      <!-- Peg / Steg parameters -->
+      <div id="params-peg" class="conn-params" style="display:none">
+        <div class="params-title">Steg-Parameter</div>
+        <div class="field-row"><label>Radius (mm)</label>  <input type="number" id="peg-radius"    value="2.0" min="0.5" max="20"  step="0.1"></div>
+        <div class="field-row"><label>Höhe (mm)</label>    <input type="number" id="peg-height"    value="3.5" min="0.5" max="30"  step="0.1"></div>
+        <div class="field-row"><label>Spiel (mm)</label>   <input type="number" id="peg-clearance" value="0.15" min="0" max="2"   step="0.05"></div>
+      </div>
+
+      <!-- Dovetail / Schwalbenschwanz parameters -->
+      <div id="params-dovetail" class="conn-params" style="display:none">
+        <div class="params-title">Schwalbenschwanz</div>
+        <div class="field-row"><label>Breite (mm)</label>   <input type="number" id="dt-width"     value="7.0" min="1"   max="50"  step="0.5"></div>
+        <div class="field-row"><label>Höhe (mm)</label>     <input type="number" id="dt-height"    value="4.5" min="0.5" max="30"  step="0.5"></div>
+        <div class="field-row"><label>Tiefe (mm)</label>    <input type="number" id="dt-depth"     value="5.0" min="0.5" max="30"  step="0.5"></div>
+        <div class="field-row"><label>Winkel (°)</label>    <input type="number" id="dt-draft"     value="12"  min="0"   max="45"  step="1"></div>
+        <div class="field-row"><label>Spiel (mm)</label>    <input type="number" id="dt-clearance" value="0.2" min="0"   max="2"   step="0.05"></div>
+      </div>
+    </div>
+
+    <!-- Download -->
+    <div id="sb-bottom">
+      <button id="dl-btn" disabled onclick="doSplit()">▼ Aufteilen &amp; Download</button>
+      <div id="status-bar">Datei öffnen zum Starten</div>
+      <div id="progress"><div id="progress-bar"></div></div>
+    </div>
+
+  </div><!-- /sidebar -->
+
+  <!-- 3D Viewport -->
+  <div id="viewport">
+    <div id="empty-hint">
+      <div class="big">🖨</div>
+      <p>Lade eine .3mf Datei um das Modell zu sehen</p>
+    </div>
+    <div id="vp-toolbar"></div>
+    <div id="vp-info"></div>
+    <div id="explode-wrap" style="display:none">
+      <span>Explodieren</span>
+      <input type="range" id="explode-slider" min="0" max="100" value="0" oninput="setExplode(this.value)">
+    </div>
+  </div>
+
+</div><!-- /main -->
+</div><!-- /app -->
+
+<!-- ── Scripts ── -->
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ── State ────────────────────────────────────────────────────────
+let scene, camera, renderer, controls;
+let modelGroup    = null;
+let assembledMesh = null;   // single merged mesh with vertexColors (assembled view)
+let partMeshes    = [];     // [{mesh, color, name, explodeOffset, visible}]
+let currentParts  = [];     // raw parsed parts from parse3mf()
+let isWireframe   = false;
+let selectedFile  = null;
+let explodeFactor = 0;
+
+// ── Three.js setup ───────────────────────────────────────────────
+function initThree() {
+  const vp = document.getElementById('viewport');
+
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.physicallyCorrectLights = true;
+  renderer.toneMappingExposure = 1.1;
+  renderer.setSize(vp.clientWidth, vp.clientHeight);
+  vp.appendChild(renderer.domElement);
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0d0f1a);
+  scene.fog = new THREE.Fog(0x0d0f1a, 800, 2000);
+
+  camera = new THREE.PerspectiveCamera(45, vp.clientWidth / vp.clientHeight, 0.1, 5000);
+  camera.position.set(80, 80, 160);
+
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.07;
+  controls.minDistance = 1;
+  controls.maxDistance = 2000;
+
+  // Lights
+  const amb = new THREE.AmbientLight(0xffffff, 0.70);
+  scene.add(amb);
+
+  const sun = new THREE.DirectionalLight(0xffffff, 1.4);
+  sun.position.set(120, 200, 80);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.camera.near = 1;
+  sun.shadow.camera.far  = 2000;
+  sun.shadow.camera.left = sun.shadow.camera.bottom = -500;
+  sun.shadow.camera.right = sun.shadow.camera.top   =  500;
+  scene.add(sun);
+
+  const fill = new THREE.DirectionalLight(0xffffff, 0.60);
+  fill.position.set(-80, 60, -120);
+  scene.add(fill);
+
+  const back = new THREE.DirectionalLight(0xffffff, 0.40);
+  back.position.set(0, -100, -200);
+  scene.add(back);
+
+  // Grid
+  const grid = new THREE.GridHelper(500, 50, 0x1e2235, 0x1e2235);
+  grid.position.y = 0;
+  scene.add(grid);
+
+  // Resize
+  window.addEventListener('resize', () => {
+    const w = vp.clientWidth, h = vp.clientHeight;
+    renderer.setSize(w, h);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  });
+
+  // Render loop
+  (function loop() {
+    requestAnimationFrame(loop);
+    controls.update();
+    renderer.render(scene, camera);
+  })();
+}
+
+// ── 3MF Parser (Slicer-aware) ──────────────────────────────────────────
+
+const AUTO_PALETTE = [
+  '#e74c3c','#3498db','#2ecc71','#f39c12','#9b59b6',
+  '#1abc9c','#e67e22','#c0392b','#e91e63','#00bcd4',
+  '#ff5722','#607d8b','#795548','#009688','#673ab7',
+];
+
+function localName(el) {
+  return (el.localName || el.tagName).split(':').pop();
+}
+
+// ── Metadata readers ─────────────────────────────────────────────────────
+
+function extractExtruderColors(zip) {
+  // Bambu / OrcaSlicer: project_settings.config (JSON)
+  const jsonCfg = zip['metadata/project_settings.config'] ||
+                  zip['metadata/slicing_info.config'];
+  if (jsonCfg) {
+    try {
+      const data = JSON.parse(jsonCfg);
+      let colors = data.filament_colour;
+      if (typeof colors === 'string')
+        colors = colors.split(/[\n;]/).map(c => c.trim()).filter(Boolean);
+      if (Array.isArray(colors) && colors.length) {
+        const out = {};
+        colors.forEach((c, i) => { out[String(i+1)] = c.startsWith('#') ? c : '#'+c; });
+        return out;
+      }
+    } catch {}
+  }
+  // PrusaSlicer: Slic3r_PE.config (INI)
+  const iniCfg = zip['metadata/slic3r_pe.config'] || zip['metadata/slic3rpe.config'];
+  if (iniCfg) {
+    const m = iniCfg.match(/filament_colour\s*=\s*([^\r\n]+)/);
+    if (m) {
+      const colors = m[1].split(';').map(c => c.trim()).filter(Boolean);
+      if (colors.length) {
+        const out = {};
+        colors.forEach((c, i) => { out[String(i+1)] = c.startsWith('#') ? c : '#'+c; });
+        return out;
+      }
+    }
+  }
+  return {};
+}
+
+function extractObjectExtruders(zip) {
+  // Bambu / OrcaSlicer: model_settings.config (XML)
+  const bambuCfg = zip['metadata/model_settings.config'];
+  if (bambuCfg) {
+    try {
+      const doc = new DOMParser().parseFromString(bambuCfg, 'text/xml');
+      const out = {};
+      for (const el of doc.getElementsByTagName('*')) {
+        const tag = localName(el);
+        if (tag === 'object' || tag === 'part') {
+          const id = el.getAttribute('id');
+          if (!id) continue;
+          for (const meta of el.children)
+            if (localName(meta) === 'metadata' && meta.getAttribute('key') === 'extruder')
+              out[id] = meta.getAttribute('value') || '1';
+        }
+      }
+      // Propagate parent extruder to component children (Bambu/Creality sub-file pattern)
+      const mainModel = zip['3d/3dmodel.model'];
+      if (mainModel) {
+        try {
+          const mdoc = new DOMParser().parseFromString(mainModel, 'text/xml');
+          for (const mobj of mdoc.getElementsByTagName('*')) {
+            if (localName(mobj) !== 'object') continue;
+            const parentId = mobj.getAttribute('id');
+            if (!parentId || !out[parentId]) continue;
+            for (const comp of mobj.getElementsByTagName('*')) {
+              if (localName(comp) !== 'component') continue;
+              const childId = comp.getAttribute('objectid');
+              if (childId && !out[childId]) out[childId] = out[parentId];
+            }
+          }
+        } catch {}
+      }
+      return out;
+    } catch {}
+  }
+  // PrusaSlicer: Slic3r_PE_model.config (XML) – object-level extruders
+  const prusaCfg = zip['metadata/slic3r_pe_model.config'] || zip['metadata/slic3rpe_model.config'];
+  if (prusaCfg) {
+    try {
+      const doc = new DOMParser().parseFromString(prusaCfg, 'text/xml');
+      const out = {};
+      for (const el of doc.getElementsByTagName('*')) {
+        if (localName(el) !== 'object') continue;
+        const id = el.getAttribute('id');
+        if (!id) continue;
+        for (const meta of el.getElementsByTagName('*'))
+          if (localName(meta) === 'metadata' && meta.getAttribute('key') === 'extruder')
+            out[id] = meta.getAttribute('value') || '1';
+      }
+      return out;
+    } catch {}
+  }
+  return {};
+}
+
+// PrusaSlicer: per-object face-range → extruder color mapping
+// Returns { objectId: [{firstid, lastid, color}] }
+function extractPrusaVolumeRanges(zip, extruderColors) {
+  const prusaCfg = zip['metadata/slic3r_pe_model.config'] || zip['metadata/slic3rpe_model.config'];
+  if (!prusaCfg) return {};
+  try {
+    const doc = new DOMParser().parseFromString(prusaCfg, 'text/xml');
+    const out = {};
+    for (const el of doc.getElementsByTagName('*')) {
+      if (localName(el) !== 'object') continue;
+      const objId = el.getAttribute('id');
+      if (!objId) continue;
+      const ranges = [];
+      for (const vol of el.children) {
+        if (localName(vol) !== 'volume') continue;
+        const firstid = parseInt(vol.getAttribute('firstid') || '0');
+        const lastid  = parseInt(vol.getAttribute('lastid')  || '-1');
+        for (const meta of vol.children) {
+          if (localName(meta) === 'metadata' && meta.getAttribute('key') === 'extruder') {
+            const ext = meta.getAttribute('value') || '1';
+            const color = extruderColors[ext];
+            if (color) ranges.push({ firstid, lastid, color });
+          }
+        }
+      }
+      if (ranges.length) out[objId] = ranges;
+    }
+    return out;
+  } catch { return {}; }
+}
+
+function collectColorGroups(xmlText, target) {
+  const doc = new DOMParser().parseFromString(xmlText, 'text/xml');
+  for (const el of doc.getElementsByTagName('*')) {
+    if (localName(el) !== 'colorgroup') continue;
+    const id = el.getAttribute('id');
+    if (!id) continue;
+    const cols = [];
+    for (const c of el.children)
+      if (localName(c) === 'color') cols.push(c.getAttribute('color') || '#808080');
+    target[id] = cols;
+  }
+}
+
+// ── Main parser ──────────────────────────────────────────────────────────
+
+async function parse3mf(file) {
+  const zip = await JSZip.loadAsync(file);
+
+  // Read all text files keyed by lower-case path
+  const z = {};
+  for (const [name, entry] of Object.entries(zip.files))
+    if (!entry.dir) try { z[name.toLowerCase()] = await entry.async('text'); } catch {}
+
+  const extruderColors  = extractExtruderColors(z);
+  const objectExtruders = extractObjectExtruders(z);
+  const volumeRanges    = extractPrusaVolumeRanges(z, extruderColors);
+
+  // Collect <m:colorgroup> from all model files
+  const colorGroups = {};
+  for (const [p, text] of Object.entries(z))
+    if (p.endsWith('.model')) collectColorGroups(text, colorGroups);
+
+  // Parse meshes
+  const parts = [];
+
+  for (const [path, text] of Object.entries(z)) {
+    if (!path.endsWith('.model')) continue;
+    const doc = new DOMParser().parseFromString(text, 'text/xml');
+
+    for (const obj of doc.getElementsByTagName('*')) {
+      if (localName(obj) !== 'object') continue;
+      if (obj.getAttribute('type') === 'support') continue;
+
+      const objId   = obj.getAttribute('id') || '';
+      const objName = obj.getAttribute('name') || `Object_${objId}`;
+      const objPid  = obj.getAttribute('pid');
+      const objP1   = obj.getAttribute('p1');
+
+      // Default color: colorgroup > direct attr > extruder metadata > gray
+      let defaultColor = '#808080';
+      if (objPid && objP1 && colorGroups[objPid])
+        defaultColor = colorGroups[objPid][parseInt(objP1)] || defaultColor;
+      const directCol = obj.getAttribute('color');
+      if (directCol) defaultColor = directCol;
+      if (objectExtruders[objId] && extruderColors[objectExtruders[objId]])
+        defaultColor = extruderColors[objectExtruders[objId]];
+
+      // Find mesh
+      let meshEl = null;
+      for (const c of obj.getElementsByTagName('*'))
+        if (localName(c) === 'mesh') { meshEl = c; break; }
+      if (!meshEl) continue;
+
+      let vertsEl = null, trisEl = null;
+      for (const c of meshEl.children) {
+        const ln = localName(c);
+        if (ln === 'vertices')  vertsEl = c;
+        if (ln === 'triangles') trisEl  = c;
+      }
+      if (!vertsEl || !trisEl) continue;
+
+      const verts = [];
+      for (const v of vertsEl.children)
+        if (localName(v) === 'vertex')
+          verts.push([parseFloat(v.getAttribute('x')||0),
+                      parseFloat(v.getAttribute('y')||0),
+                      parseFloat(v.getAttribute('z')||0)]);
+      if (!verts.length) continue;
+
+      // Volume ranges for this object (PrusaSlicer multi-material)
+      const volRanges = volumeRanges[objId] || [];
+
+      // Group faces by color
+      const colorFaces = {};
+      let faceIdx = 0;
+      for (const tri of trisEl.children) {
+        if (localName(tri) !== 'triangle') continue;
+        const v1 = parseInt(tri.getAttribute('v1')||0);
+        const v2 = parseInt(tri.getAttribute('v2')||0);
+        const v3 = parseInt(tri.getAttribute('v3')||0);
+
+        // Standard per-face color group
+        const pid = tri.getAttribute('pid') || objPid;
+        const p1  = tri.getAttribute('p1')  || objP1;
+        let color = defaultColor;
+        if (pid && p1 && colorGroups[pid])
+          color = colorGroups[pid][parseInt(p1)] || color;
+
+        // Bambu / Creality paint_color attribute (upper nibble = MMU extruder index)
+        const paintColor = tri.getAttribute('paint_color');
+        if (paintColor && Object.keys(extruderColors).length) {
+          try {
+            const hex2 = paintColor.length >= 2 ? paintColor.slice(0,2) : ('0' + paintColor);
+            const firstByte = parseInt(hex2, 16);
+            const mmuIdx = (firstByte >> 4) & 0xF;
+            const baseExt = objectExtruders[objId] || '1';
+            const extKey = mmuIdx > 0 ? String(mmuIdx) : baseExt;
+            if (extruderColors[extKey]) color = extruderColors[extKey];
+          } catch(e) {}
+        }
+
+        // PrusaSlicer volume range overrides per face index
+        for (const r of volRanges) {
+          if (faceIdx >= r.firstid && faceIdx <= r.lastid) { color = r.color; break; }
+        }
+
+        const key = color.toLowerCase();
+        if (!colorFaces[key]) colorFaces[key] = { color: key, faces: [] };
+        colorFaces[key].faces.push([v1, v2, v3]);
+        faceIdx++;
+      }
+
+      for (const [hex, group] of Object.entries(colorFaces))
+        parts.push({ name: `${objName}_${hex}`, displayName: objName,
+                     color: hex, vertices: verts, faces: group.faces });
+    }
+  }
+
+  if (!parts.length) throw new Error('Keine Teile gefunden');
+
+  // Auto-palette: assign by index so each part gets a distinct color
+  if (parts.every(p => p.color === '#808080')) {
+    parts.forEach((p, i) => { p.color = AUTO_PALETTE[i % AUTO_PALETTE.length]; });
+  }
+
+  // Fill open boundary holes on each color part
+  for (const p of parts) {
+    const filled = fillHoles(p.vertices, p.faces);
+    p.vertices = filled.vertices;
+    p.faces    = filled.faces;
+  }
+
+  return parts;
+}
+
+// ── Hole filling (boundary-edge → fan triangulation) ─────────────────────────
+// Closes the open cuts left when splitting a mesh by color.
+// Each boundary loop is capped by fan triangles from its centroid.
+function fillHoles(vertices, faces) {
+  // Count how many times each undirected edge appears
+  const edgeCnt = new Map();
+  for (const [i0, i1, i2] of faces) {
+    for (const [a, b] of [[i0,i1],[i1,i2],[i2,i0]]) {
+      const key = a < b ? a + '_' + b : b + '_' + a;
+      edgeCnt.set(key, (edgeCnt.get(key) || 0) + 1);
+    }
+  }
+
+  // Build directed boundary: for each face edge that is a boundary,
+  // record nextVert[b] = a so the loop runs COUNTER to face winding
+  // (= outward-facing cap normal when faces are CCW outward).
+  const nextVert = new Map();
+  for (const [i0, i1, i2] of faces) {
+    for (const [a, b] of [[i0,i1],[i1,i2],[i2,i0]]) {
+      const key = a < b ? a + '_' + b : b + '_' + a;
+      if (edgeCnt.get(key) === 1) nextVert.set(b, a);
+    }
+  }
+
+  if (nextVert.size === 0) return { vertices, faces }; // already closed
+
+  // Chain directed edges into closed boundary loops
+  const visited = new Set();
+  const loops = [];
+  for (const start of nextVert.keys()) {
+    if (visited.has(start)) continue;
+    const loop = [];
+    let curr = start;
+    let safety = nextVert.size + 1;
+    while (!visited.has(curr) && safety-- > 0) {
+      visited.add(curr);
+      loop.push(curr);
+      curr = nextVert.get(curr);
+      if (curr === undefined) break;
+    }
+    if (loop.length >= 3) loops.push(loop);
+  }
+
+  if (loops.length === 0) return { vertices, faces };
+
+  // Cap each loop: fan from centroid
+  const newVerts = vertices.map(v => [...v]); // shallow copy
+  const newFaces = faces.map(f => [...f]);
+
+  for (const loop of loops) {
+    // Compute centroid of the loop vertices
+    let cx = 0, cy = 0, cz = 0;
+    for (const vi of loop) {
+      cx += newVerts[vi][0]; cy += newVerts[vi][1]; cz += newVerts[vi][2];
+    }
+    const n = loop.length;
+    cx /= n; cy /= n; cz /= n;
+
+    const ci = newVerts.length;
+    newVerts.push([cx, cy, cz]);
+
+    for (let i = 0; i < n; i++) {
+      const v0 = loop[i];
+      const v1 = loop[(i + 1) % n];
+      newFaces.push([ci, v0, v1]);
+    }
+  }
+
+  return { vertices: newVerts, faces: newFaces };
+}
+
+// ── Helpers ──────────────────────────────────────────────────────
+function hexToRgbF(hex) {
+  const h = hex.replace('#','');
+  return [parseInt(h.slice(0,2),16)/255, parseInt(h.slice(2,4),16)/255, parseInt(h.slice(4,6),16)/255];
+}
+
+// ── Build meshes ──────────────────────────────────────────────────
+// Assembled: one merged BufferGeometry with per-vertex colors
+// Uses MeshStandardMaterial with 20% brightness lift so dark colors stay visible.
+function buildAssembledMesh(parts) {
+  let totalTris = 0;
+  for (const p of parts) totalTris += p.faces.length;
+
+  const positions = new Float32Array(totalTris * 9);
+  const normals   = new Float32Array(totalTris * 9);
+  const colors    = new Float32Array(totalTris * 9);
+  let ptr = 0;
+
+  for (const p of parts) {
+    let [r, g, b] = hexToRgbF(p.color);
+    // Lift dark colors: mix 22% white so #000 becomes visible dark gray
+    r = r * 0.78 + 0.22;
+    g = g * 0.78 + 0.22;
+    b = b * 0.78 + 0.22;
+    for (const [i0, i1, i2] of p.faces) {
+      for (const vi of [i0, i1, i2]) {
+        const v = p.vertices[vi];
+        positions[ptr*3] = v[0]; positions[ptr*3+1] = v[1]; positions[ptr*3+2] = v[2];
+        colors[ptr*3]    = r;    colors[ptr*3+1]    = g;    colors[ptr*3+2]    = b;
+        ptr++;
+      }
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('color',    new THREE.BufferAttribute(colors, 3));
+  geo.computeVertexNormals();
+
+  // MeshStandardMaterial gives PBR shading while still showing per-vertex colors
+  return new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    roughness: 0.65,
+    metalness: 0.05,
+    side: THREE.DoubleSide,
+  }));
+}
+
+// Split: one solid-color mesh per color part (for explode view)
+function buildSplitMesh(part) {
+  const positions = new Float32Array(part.faces.length * 9);
+  let ptr = 0;
+  for (const [i0, i1, i2] of part.faces) {
+    for (const vi of [i0, i1, i2]) {
+      const v = part.vertices[vi];
+      positions[ptr*3] = v[0]; positions[ptr*3+1] = v[1]; positions[ptr*3+2] = v[2];
+      ptr++;
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.computeVertexNormals();
+
+  const c = new THREE.Color(part.color);
+  const hsl = {}; c.getHSL(hsl);
+  if (hsl.l < 0.12) c.setHSL(hsl.h, hsl.s, 0.22);
+
+  const mesh = new THREE.Mesh(geo, new THREE.MeshPhongMaterial({
+    color: c, specular: new THREE.Color(0x333355), shininess: 35, side: THREE.DoubleSide,
+  }));
+  mesh.castShadow = mesh.receiveShadow = true;
+  return mesh;
+}
+
+// ── Load model ───────────────────────────────────────────────────
+window.loadModel = async function(file) {
+  setStatus('Analysiere …', 'busy');
+  setProgress(15);
+  document.getElementById('empty-hint').style.display = 'none';
+
+  try {
+    currentParts = await parse3mf(file);
+    setProgress(60);
+
+    if (modelGroup) { scene.remove(modelGroup); modelGroup = null; }
+    assembledMesh = null;
+    partMeshes = [];
+
+    modelGroup = new THREE.Group();
+    scene.add(modelGroup);
+
+    // Assembled mesh - single geometry with all colors via vertexColors
+    assembledMesh = buildAssembledMesh(currentParts);
+    assembledMesh.castShadow = assembledMesh.receiveShadow = true;
+    modelGroup.add(assembledMesh);
+
+    // Split meshes - hidden until explode > 0
+    for (const p of currentParts) {
+      const mesh = buildSplitMesh(p);
+      mesh.visible = false;
+      modelGroup.add(mesh);
+      partMeshes.push({ mesh, color: p.color, name: p.name, visible: true });
+    }
+
+    // Center model on grid
+    const box = new THREE.Box3().setFromObject(assembledMesh);
+    const center = new THREE.Vector3(); box.getCenter(center);
+    const sz = new THREE.Vector3(); box.getSize(sz);
+    modelGroup.position.set(-center.x, -center.y + sz.y / 2, -center.z);
+
+    // Compute per-part explode offsets from overall vertex centroid
+    let mx = 0, my = 0, mz = 0, mc = 0;
+    for (const p of currentParts) {
+      for (const v of p.vertices) { mx += v[0]; my += v[1]; mz += v[2]; mc++; }
+    }
+    mx /= mc; my /= mc; mz /= mc;
+
+    currentParts.forEach((p, i) => {
+      let cx = 0, cy = 0, cz = 0;
+      for (const v of p.vertices) { cx += v[0]; cy += v[1]; cz += v[2]; }
+      cx /= p.vertices.length; cy /= p.vertices.length; cz /= p.vertices.length;
+      const dir = new THREE.Vector3(cx - mx, cy - my, cz - mz);
+      if (dir.lengthSq() < 1.0)
+        dir.set(Math.cos(i * 2.4), 0.3, Math.sin(i * 2.4));
+      partMeshes[i].explodeOffset = dir.normalize();
+    });
+
+    // Reset to assembled mode
+    splitActive = false;
+    explodeFactor = 0;
+    document.getElementById('explode-slider').value = 0;
+    document.getElementById('explode-wrap').style.display = 'flex';
+    const btn = document.getElementById('btn-split');
+    btn.textContent = '▫ Geteilt'; btn.classList.remove('active');
+
+    setProgress(90);
+    fitCamera();
+    setProgress(100);
+
+    renderPartsList();
+    updateVpInfo();
+    const totalFaces = currentParts.reduce((s, p) => s + p.faces.length, 0);
+    setStatus(currentParts.length + ' Farben · ' + totalFaces.toLocaleString() + ' Dreiecke', 'ok');
+    document.getElementById('dl-btn').disabled = false;
+    setTimeout(() => setProgress(0), 600);
+  } catch (e) {
+    setStatus('❌ ' + e.message, 'err');
+    setProgress(0);
+  }
+};
+
+// ── Parts list ───────────────────────────────────────────────────
+function renderPartsList() {
+  const list = document.getElementById('parts-list');
+  list.innerHTML = '';
+  document.getElementById('part-count').textContent = '(' + currentParts.length + ')';
+
+  partMeshes.forEach((p, i) => {
+    const row = document.createElement('div');
+    row.className = 'part-row';
+    row.dataset.idx = i;
+    const faceLabel = currentParts[i] ? currentParts[i].faces.length.toLocaleString() + ' Fl.' : '';
+    row.innerHTML =
+      '<div class="color-swatch" style="background:' + p.color + '"></div>' +
+      '<div style="flex:1;min-width:0">' +
+        '<div class="part-label">' + (p.name.replace(/_#[0-9a-fA-F]+$/, '') || 'Teil '+(i+1)) + '</div>' +
+        '<div class="part-hex">' + p.color + ' &middot; ' + faceLabel + '</div>' +
+      '</div>' +
+      '<span class="eye-btn" title="Ein/Ausblenden">👁</span>';
+
+    row.querySelector('.eye-btn').addEventListener('click', e => {
+      e.stopPropagation(); togglePart(i, row);
+    });
+    row.addEventListener('click', () => isolatePart(i));
+    list.appendChild(row);
+  });
+}
+
+function togglePart(idx, row) {
+  const p = partMeshes[idx];
+  p.visible = !p.visible;
+  if (explodeFactor > 0.02) p.mesh.visible = p.visible;
+  row.classList.toggle('hidden-part', !p.visible);
+  row.querySelector('.eye-btn').textContent = p.visible ? '👁' : '🙈';
+}
+
+let isolatedIdx = null;
+function isolatePart(idx) {
+  if (isolatedIdx === idx) {
+    isolatedIdx = null;
+    document.querySelectorAll('.part-row').forEach(r => r.classList.remove('active-part'));
+    if (explodeFactor <= 0.02) {
+      if (assembledMesh) assembledMesh.visible = true;
+      partMeshes.forEach(p => { p.mesh.visible = false; });
+    } else {
+      partMeshes.forEach(p => { p.mesh.visible = p.visible; });
+    }
+  } else {
+    isolatedIdx = idx;
+    if (assembledMesh) assembledMesh.visible = false;
+    partMeshes.forEach((p, i) => {
+      p.mesh.visible = (i === idx);
+      document.querySelectorAll('.part-row')[i]?.classList.toggle('active-part', i === idx);
+    });
+  }
+}
+
+// ── Camera helpers ───────────────────────────────────────────────
+window.fitCamera = function() {
+  if (!modelGroup) return;
+  const box = new THREE.Box3().setFromObject(modelGroup);
+  const sz  = new THREE.Vector3(); box.getSize(sz);
+  const center = new THREE.Vector3(); box.getCenter(center);
+  const maxDim = Math.max(sz.x, sz.y, sz.z);
+  const dist   = maxDim / (2 * Math.tan((camera.fov * Math.PI / 180) / 2)) * 1.5;
+  camera.position.set(center.x + dist*.6, center.y + dist*.5, center.z + dist);
+  controls.target.copy(center);
+  controls.update();
+};
+
+window.resetCamera = function() {
+  camera.position.set(80, 80, 160);
+  controls.target.set(0, 0, 0);
+  controls.update();
+};
+
+window.toggleWireframe = function() {
+  isWireframe = !isWireframe;
+  if (assembledMesh) assembledMesh.material.wireframe = isWireframe;
+  for (const p of partMeshes) p.mesh.material.wireframe = isWireframe;
+  document.getElementById('btn-wire').classList.toggle('active', isWireframe);
+};
+
+// ── Split / Explode ──────────────────────────────────────────────
+let splitActive = false;
+
+window.toggleSplitView = function() {
+  splitActive = !splitActive;
+  const btn = document.getElementById('btn-split');
+  btn.classList.toggle('active', splitActive);
+  btn.textContent = splitActive ? '▣ Zusammen' : '▫ Geteilt';
+  animateExplode(splitActive ? 100 : 0);
+};
+
+function animateExplode(targetVal) {
+  const slider = document.getElementById('explode-slider');
+  const startVal = parseFloat(slider.value);
+  const t0 = performance.now();
+  const duration = 480;
+  function step(now) {
+    const t = Math.min((now - t0) / duration, 1);
+    const e = t < 0.5 ? 2*t*t : -1 + (4 - 2*t)*t;
+    const v = startVal + (targetVal - startVal) * e;
+    slider.value = v;
+    setExplode(v);
+    if (t < 1) requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+}
+
+window.setExplode = function(val) {
+  explodeFactor = val / 100;
+  if (!modelGroup) return;
+
+  const SCALE = 80;
+
+  if (explodeFactor < 0.02) {
+    if (assembledMesh) assembledMesh.visible = true;
+    partMeshes.forEach(p => { p.mesh.visible = false; });
+    isolatedIdx = null;
+    document.querySelectorAll('.part-row').forEach(r => r.classList.remove('active-part'));
+  } else {
+    if (assembledMesh) assembledMesh.visible = false;
+    partMeshes.forEach((p, i) => {
+      p.mesh.visible = p.visible;
+      const off = p.explodeOffset || new THREE.Vector3(Math.cos(i*2.4), 0, Math.sin(i*2.4));
+      p.mesh.position.copy(off).multiplyScalar(explodeFactor * SCALE);
+    });
+  }
+};
+
+// ── Viewport info ────────────────────────────────────────────────
+function updateVpInfo() {
+  const el = document.getElementById('vp-info');
+  if (!currentParts.length) { el.textContent = ''; return; }
+  const total = currentParts.reduce((s, p) => s + p.faces.length, 0);
+  el.textContent = currentParts.length + ' Teile · ' + total.toLocaleString() + ' Dreiecke · Linksklick: drehen · Rechtsklick: verschieben · Scroll: zoom';
+}
+
+// ── Connector param helper ───────────────────────────────────────────────
+window.updateConnParams = function() {
+  const type = document.querySelector('input[name="conn"]:checked')?.value || 'none';
+  document.querySelectorAll('.conn-params').forEach(el => el.style.display = 'none');
+  const panel = document.getElementById('params-' + type);
+  if (panel) panel.style.display = 'block';
+};
+
+function collectConnParams(fd, connType) {
+  if (connType === 'magnet') {
+    fd.append('magnet_radius',  document.getElementById('magnet-radius').value);
+    fd.append('magnet_depth',   document.getElementById('magnet-depth').value);
+  } else if (connType === 'peg') {
+    fd.append('peg_radius',     document.getElementById('peg-radius').value);
+    fd.append('peg_height',     document.getElementById('peg-height').value);
+    fd.append('peg_clearance',  document.getElementById('peg-clearance').value);
+  } else if (connType === 'dovetail') {
+    fd.append('dt_width',       document.getElementById('dt-width').value);
+    fd.append('dt_height',      document.getElementById('dt-height').value);
+    fd.append('dt_depth',       document.getElementById('dt-depth').value);
+    fd.append('dt_draft_deg',   document.getElementById('dt-draft').value);
+    fd.append('dt_clearance',   document.getElementById('dt-clearance').value);
+  }
+}
+
+// ── Split & download ─────────────────────────────────────────────
+window.doSplit = async function() {
+  if (!selectedFile) return;
+  const btn = document.getElementById('dl-btn');
+  btn.disabled = true;
+  setStatus('Verarbeite auf Server …', 'busy');
+  setProgress(20);
+
+  const connector  = document.querySelector('input[name="conn"]:checked').value;
+  const nConnectors = document.getElementById('n-conn').value;
+
+  let prog = 20;
+  const tick = setInterval(() => { prog = Math.min(prog + 5, 88); setProgress(prog); }, 700);
+
+  try {
+    const fd = new FormData();
+    fd.append('file', selectedFile);
+    fd.append('connector', connector);
+    fd.append('n_connectors', nConnectors);
+    collectConnParams(fd, connector);
+
+    const r = await fetch('/api/split', { method: 'POST', body: fd });
+    if (!r.ok) {
+      const e = await r.json();
+      throw new Error(e.detail || 'Server-Fehler');
+    }
+
+    clearInterval(tick);
+    setProgress(100);
+
+    const count = r.headers.get('X-Part-Count') || '?';
+    setStatus(`✓ ${count} STL-Dateien erstellt`, 'ok');
+
+    const blob = await r.blob();
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url;
+    a.download = selectedFile.name.replace('.3mf','') + '_parts.zip';
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+  } catch(e) {
+    clearInterval(tick);
+    setStatus('❌ ' + e.message, 'err');
+  } finally {
+    btn.disabled = false;
+    setTimeout(() => setProgress(0), 800);
+  }
+};
+
+// ── UI helpers ───────────────────────────────────────────────────
+function setStatus(msg, type='') {
+  const el = document.getElementById('status-bar');
+  el.textContent = msg;
+  el.className = type;
+}
+
+function setProgress(pct) {
+  document.getElementById('progress-bar').style.width = pct + '%';
+}
+
+function selectFile(f) {
+  if (!f || !f.name.endsWith('.3mf')) {
+    setStatus('Nur .3mf Dateien werden unterstützt', 'err'); return;
+  }
+  selectedFile = f;
+  document.getElementById('file-tag').textContent = f.name;
+  document.getElementById('file-tag').style.display = 'block';
+  document.getElementById('drop-hint').style.display = 'none';
+  loadModel(f);
+}
+
+// ── Events ───────────────────────────────────────────────────────
+document.getElementById('file-input').addEventListener('change', function() {
+  if (this.files[0]) selectFile(this.files[0]);
+});
+
+const dz = document.getElementById('dropzone');
+dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('over'); });
+dz.addEventListener('dragleave', () => dz.classList.remove('over'));
+dz.addEventListener('drop', e => {
+  e.preventDefault(); dz.classList.remove('over');
+  selectFile(e.dataTransfer.files[0]);
+});
+
+// ── Init ─────────────────────────────────────────────────────────
+initThree();
+</script>
+</body>
+</html>
