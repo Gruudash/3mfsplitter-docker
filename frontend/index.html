@@ -536,6 +536,33 @@ function collectColorGroups(xmlText, target) {
   }
 }
 
+// Splits a flat triangle list into groups that share no vertices with any
+// other group (union-find over vertex indices) -- i.e. its disconnected
+// physical islands.
+function splitConnectedComponents(faces) {
+  const parent = new Map();
+  const find = x => {
+    while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); }
+    return x;
+  };
+  const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent.set(ra, rb); };
+
+  for (const [a, b, c] of faces) {
+    if (!parent.has(a)) parent.set(a, a);
+    if (!parent.has(b)) parent.set(b, b);
+    if (!parent.has(c)) parent.set(c, c);
+    union(a, b); union(b, c);
+  }
+
+  const groups = new Map();
+  for (const f of faces) {
+    const root = find(f[0]);
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root).push(f);
+  }
+  return Array.from(groups.values());
+}
+
 // ── Main parser ──────────────────────────────────────────────────────────
 
 async function parse3mf(file) {
@@ -645,9 +672,18 @@ async function parse3mf(file) {
         faceIdx++;
       }
 
-      for (const [hex, group] of Object.entries(colorFaces))
-        parts.push({ name: `${objName}_${hex}`, displayName: objName,
-                     color: hex, vertices: verts, faces: group.faces });
+      // Split each color group into its physically disconnected islands
+      // (vertex-connectivity components) so e.g. two separate same-color
+      // legs show up -- and stay individually clickable -- as two parts
+      // in the viewer instead of one merged, ambiguous selection target.
+      for (const [hex, group] of Object.entries(colorFaces)) {
+        const islands = splitConnectedComponents(group.faces);
+        islands.forEach((islandFaces, i) => {
+          const suffix = i === 0 ? '' : `_${i + 1}`;
+          parts.push({ name: `${objName}_${hex}${suffix}`, displayName: objName,
+                       color: hex, vertices: verts, faces: islandFaces });
+        });
+      }
     }
   }
 
