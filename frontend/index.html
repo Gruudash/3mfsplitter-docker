@@ -1008,11 +1008,83 @@ function setFaceHighlightVisible(visible) {
   if (faceHighlight) faceHighlight.visible = visible;
 }
 
-// Overlays the face under the cursor with a highlight triangle, offset
-// slightly along its normal so it doesn't z-fight with the surface.
+// Per-mesh cache: triangle adjacency (via shared edges) + local-space face
+// normals, built once and reused so hovering doesn't reprocess a
+// 100k+-triangle mesh on every mousemove.
+const faceAdjacencyCache = new WeakMap();
+
+function getFaceAdjacency(mesh) {
+  let data = faceAdjacencyCache.get(mesh);
+  if (data) return data;
+
+  const geo = mesh.geometry;
+  const pos = geo.attributes.position;
+  const idx = geo.index;
+  const triCount = (idx ? idx.count : pos.count) / 3;
+  const vi = (f, k) => idx ? idx.getX(f * 3 + k) : f * 3 + k;
+
+  const edgeMap = new Map();
+  const addEdge = (a, b, tri) => {
+    const key = a < b ? a + '_' + b : b + '_' + a;
+    let arr = edgeMap.get(key);
+    if (!arr) { arr = []; edgeMap.set(key, arr); }
+    arr.push(tri);
+  };
+  for (let f = 0; f < triCount; f++) {
+    const a = vi(f, 0), b = vi(f, 1), c = vi(f, 2);
+    addEdge(a, b, f); addEdge(b, c, f); addEdge(c, a, f);
+  }
+  const adjacency = new Array(triCount);
+  for (let f = 0; f < triCount; f++) adjacency[f] = [];
+  for (const arr of edgeMap.values()) {
+    if (arr.length === 2) { adjacency[arr[0]].push(arr[1]); adjacency[arr[1]].push(arr[0]); }
+  }
+
+  const normals = new Array(triCount);
+  const vA = new THREE.Vector3(), vB = new THREE.Vector3(), vC = new THREE.Vector3();
+  for (let f = 0; f < triCount; f++) {
+    const a = vi(f, 0), b = vi(f, 1), c = vi(f, 2);
+    vA.set(pos.getX(a), pos.getY(a), pos.getZ(a));
+    vB.set(pos.getX(b), pos.getY(b), pos.getZ(b));
+    vC.set(pos.getX(c), pos.getY(c), pos.getZ(c));
+    normals[f] = new THREE.Vector3().subVectors(vC, vB).cross(vA.clone().sub(vB)).normalize();
+  }
+
+  data = { triCount, vi, adjacency, normals };
+  faceAdjacencyCache.set(mesh, data);
+  return data;
+}
+
+// Flood-fills outward from the seed triangle to every triangle whose
+// normal stays within FACE_ANGLE_DEG of the seed's -- this is what makes
+// a click land on the whole flat face (like Cura/Creality's "place on
+// face"), not just the one microscopic raycast-hit triangle.
+const FACE_ANGLE_DEG = 3;
+const FACE_REGION_CAP = 20000; // safety cap for pathological/very fine meshes
+
+function collectCoplanarRegion(mesh, seedFace) {
+  const { adjacency, normals } = getFaceAdjacency(mesh);
+  const seedNormal = normals[seedFace];
+  const cosThresh = Math.cos(THREE.MathUtils.degToRad(FACE_ANGLE_DEG));
+  const visited = new Set([seedFace]);
+  const queue = [seedFace];
+  while (queue.length && visited.size < FACE_REGION_CAP) {
+    const f = queue.pop();
+    for (const nb of adjacency[f]) {
+      if (visited.has(nb)) continue;
+      if (normals[nb].dot(seedNormal) >= cosThresh) { visited.add(nb); queue.push(nb); }
+    }
+  }
+  return visited;
+}
+
+let lastHoverKey = null;
+
+// Overlays the whole flat face region under the cursor (not just the one
+// hit triangle), offset slightly along its normal to avoid z-fighting.
 function updateFaceHighlight(event) {
   const pickMesh = currentPickMesh();
-  if (!pickMesh) { setFaceHighlightVisible(false); return; }
+  if (!pickMesh) { setFaceHighlightVisible(false); lastHoverKey = null; return; }
 
   const rect = renderer.domElement.getBoundingClientRect();
   const ndc = new THREE.Vector2(
@@ -1022,28 +1094,27 @@ function updateFaceHighlight(event) {
   const raycaster = new THREE.Raycaster();
   raycaster.setFromCamera(ndc, camera);
   const hits = raycaster.intersectObject(pickMesh, false);
-  if (!hits.length) { setFaceHighlightVisible(false); return; }
+  if (!hits.length) { setFaceHighlightVisible(false); lastHoverKey = null; return; }
 
-  const hit = hits[0];
+  const hoverKey = pickMesh.uuid + ':' + hits[0].faceIndex;
+  if (hoverKey === lastHoverKey) { setFaceHighlightVisible(true); return; }
+  lastHoverKey = hoverKey;
+
+  const region = collectCoplanarRegion(pickMesh, hits[0].faceIndex);
+  const { vi } = getFaceAdjacency(pickMesh);
   const pos = pickMesh.geometry.attributes.position;
-  const idx = pickMesh.geometry.index;
-  const ia = idx ? idx.getX(hit.faceIndex * 3)     : hit.face.a;
-  const ib = idx ? idx.getX(hit.faceIndex * 3 + 1) : hit.face.b;
-  const ic = idx ? idx.getX(hit.faceIndex * 3 + 2) : hit.face.c;
+  const normal = hits[0].face.normal.clone().transformDirection(pickMesh.matrixWorld).normalize();
+  const nudge = normal.clone().multiplyScalar(0.15); // avoid z-fighting with the surface
 
-  const verts = [ia, ib, ic].map(i => {
-    const v = new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i));
-    return pickMesh.localToWorld(v);
-  });
-  const normal = hit.face.normal.clone().transformDirection(pickMesh.matrixWorld).normalize();
-  const nudge = normal.multiplyScalar(0.15); // avoid z-fighting with the surface
-  verts.forEach(v => v.add(nudge));
-
-  const positions = new Float32Array([
-    verts[0].x, verts[0].y, verts[0].z,
-    verts[1].x, verts[1].y, verts[1].z,
-    verts[2].x, verts[2].y, verts[2].z,
-  ]);
+  const positions = new Float32Array(region.size * 9);
+  let o = 0;
+  for (const f of region) {
+    for (let k = 0; k < 3; k++) {
+      const i = vi(f, k);
+      const v = pickMesh.localToWorld(new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i))).add(nudge);
+      positions[o++] = v.x; positions[o++] = v.y; positions[o++] = v.z;
+    }
+  }
   faceHighlight.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   faceHighlight.geometry.computeVertexNormals();
   setFaceHighlightVisible(true);
