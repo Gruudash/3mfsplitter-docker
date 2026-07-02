@@ -128,7 +128,7 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg);
 
 #vp-toolbar {
   position: absolute; top: 12px; right: 12px;
-  display: flex; gap: 6px;
+  display: flex; flex-direction: column; align-items: stretch; gap: 6px;
 }
 
 #vp-info {
@@ -147,11 +147,11 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg);
 #empty-hint p { font-size: 13px; }
 
 /* Explode slider */
-#explode-wrap { position: absolute; bottom: 12px; right: 12px;
-                display: flex; align-items: center; gap: 8px;
-                background: rgba(13,15,26,.75); padding: 6px 10px; border-radius: 8px;
-                font-size: 11px; color: var(--muted); }
-#explode-wrap input { width: 80px; accent-color: var(--accent); }
+#explode-wrap { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+                display: flex; align-items: center; gap: 12px;
+                background: rgba(13,15,26,.75); padding: 10px 18px; border-radius: 10px;
+                font-size: 13px; color: var(--muted); }
+#explode-wrap input { width: 220px; height: 6px; accent-color: var(--accent); }
 
 .conn-params { margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
 .params-title { font-size: 10px; font-weight: 700; text-transform: uppercase;
@@ -171,11 +171,6 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg);
 <!-- ── Top bar ── -->
 <div id="topbar">
   <h1>3MF <span>Splitter</span></h1>
-  <button class="tb-btn" id="btn-split" onclick="toggleSplitView()" title="Zusammengesetzt / Geteilt">◫ Geteilt</button>
-  <button class="tb-btn" id="btn-wire" onclick="toggleWireframe()" title="Wireframe">Wireframe</button>
-  <button class="tb-btn" id="btn-fit"  onclick="fitCamera()"        title="Kamera einpassen">Einpassen</button>
-  <button class="tb-btn"               onclick="resetCamera()"       title="Kamera reset">Reset</button>
-  <button class="tb-btn" id="btn-plate" onclick="toggleFacePick()"  title="Fläche des isolierten Teils anklicken, um sie auf die Platte zu legen">⬇ Ebene wählen</button>
 </div>
 
 <!-- ── Main ── -->
@@ -257,7 +252,13 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg);
       <div class="big">🖨</div>
       <p>Lade eine .3mf Datei um das Modell zu sehen</p>
     </div>
-    <div id="vp-toolbar"></div>
+    <div id="vp-toolbar">
+      <button class="tb-btn" id="btn-split" onclick="toggleSplitView()" title="Zusammengesetzt / Geteilt">◫ Geteilt</button>
+      <button class="tb-btn" id="btn-wire" onclick="toggleWireframe()" title="Wireframe">Wireframe</button>
+      <button class="tb-btn" id="btn-fit"  onclick="fitCamera()"        title="Kamera einpassen">Einpassen</button>
+      <button class="tb-btn"               onclick="resetCamera()"       title="Kamera reset">Reset</button>
+      <button class="tb-btn" id="btn-plate" onclick="toggleFacePick()"  title="Fläche des isolierten Teils anklicken, um sie auf die Platte zu legen">⬇ Ebene wählen</button>
+    </div>
     <div id="vp-info"></div>
     <div id="explode-wrap" style="display:none">
       <span>Explodieren</span>
