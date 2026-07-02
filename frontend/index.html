@@ -321,9 +321,10 @@ function initThree() {
   renderer.domElement.addEventListener('pointerdown', e => { pickDownPos = { x: e.clientX, y: e.clientY }; });
   renderer.domElement.addEventListener('pointerup', e => {
     const down = pickDownPos; pickDownPos = null;
-    if (!facePickArmed || !down) return;
-    if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) return; // was a drag
-    handleFacePick(e);
+    if (!down) return;
+    if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) return; // was a drag, not a click
+    if (facePickArmed) { handleFacePick(e); return; }
+    handleViewportSelect(e);
   });
   renderer.domElement.addEventListener('pointermove', e => {
     if (facePickArmed) updateFaceHighlight(e);
@@ -943,6 +944,26 @@ function isolatePart(idx) {
       document.querySelectorAll('.part-row')[i]?.classList.toggle('active-part', i === idx);
     });
   }
+}
+
+// Click-to-select in the 3D view: raycasts against every part mesh (even
+// hidden ones -- in assembled view they sit exactly where the visible
+// assembledMesh renders them) and isolates whichever one was hit, same as
+// clicking its row in the sidebar. A miss (empty space) leaves the
+// current selection untouched.
+function handleViewportSelect(event) {
+  if (!partMeshes.length) return;
+  const rect = renderer.domElement.getBoundingClientRect();
+  const ndc = new THREE.Vector2(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1
+  );
+  const raycaster = new THREE.Raycaster();
+  raycaster.setFromCamera(ndc, camera);
+  const hits = raycaster.intersectObjects(partMeshes.map(p => p.mesh), false);
+  if (!hits.length) return;
+  const idx = partMeshes.findIndex(p => p.mesh === hits[0].object);
+  if (idx >= 0) isolatePart(idx);
 }
 
 // ── Camera helpers ───────────────────────────────────────────────
