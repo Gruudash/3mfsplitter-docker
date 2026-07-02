@@ -118,6 +118,7 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg);
 /* ── 3D Viewport ───────────────────────────── */
 #viewport { flex: 1; position: relative; overflow: hidden; }
 #viewport canvas { display: block; }
+#viewport.face-pick-cursor canvas { cursor: crosshair; }
 
 #vp-toolbar {
   position: absolute; top: 12px; right: 12px;
@@ -168,7 +169,7 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg);
   <button class="tb-btn" id="btn-wire" onclick="toggleWireframe()" title="Wireframe">Wireframe</button>
   <button class="tb-btn" id="btn-fit"  onclick="fitCamera()"        title="Kamera einpassen">Einpassen</button>
   <button class="tb-btn"               onclick="resetCamera()"       title="Kamera reset">Reset</button>
-  <button class="tb-btn" id="btn-plate" onclick="placeOnPlate()"     title="Isoliertes Teil auf die Platte (Grid) absenken">⬇ Auf Platte</button>
+  <button class="tb-btn" id="btn-plate" onclick="toggleFacePick()"  title="Fläche des isolierten Teils anklicken, um sie auf die Platte zu legen">⬇ Ebene wählen</button>
 </div>
 
 <!-- ── Main ── -->
@@ -283,6 +284,7 @@ let currentParts  = [];     // raw parsed parts from parse3mf()
 let isWireframe   = false;
 let selectedFile  = null;
 let explodeFactor = 0;
+let facePickArmed = false;
 
 // ── Three.js setup ───────────────────────────────────────────────
 function initThree() {
@@ -310,6 +312,18 @@ function initThree() {
   controls.dampingFactor = 0.07;
   controls.minDistance = 1;
   controls.maxDistance = 2000;
+
+  // Face-pick for "place on plate": while armed, clicking a face on the
+  // isolated part rotates it flush onto the grid. pointerdown/pointerup
+  // distance check tells a click apart from an OrbitControls drag.
+  let pickDownPos = null;
+  renderer.domElement.addEventListener('pointerdown', e => { pickDownPos = { x: e.clientX, y: e.clientY }; });
+  renderer.domElement.addEventListener('pointerup', e => {
+    const down = pickDownPos; pickDownPos = null;
+    if (!facePickArmed || !down) return;
+    if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) return; // was a drag
+    handleFacePick(e);
+  });
 
   // Lights
   const amb = new THREE.AmbientLight(0xffffff, 0.70);
@@ -938,20 +952,67 @@ window.toggleWireframe = function() {
   document.getElementById('btn-wire').classList.toggle('active', isWireframe);
 };
 
-// Drop the currently isolated part straight down (no rotation) until its
-// lowest point touches the grid -- like a slicer's "place on plate", so an
-// individually inspected part doesn't sit floating at its original height
-// from the assembled model's coordinate frame.
-window.placeOnPlate = function() {
+// ── Place on plate (face selection) ─────────────────────────────────
+// Arms/disarms face-pick mode: while armed, clicking a face on the
+// isolated part rotates the part so that face is flush with the grid
+// (like a slicer's "place on face"), then drops it to touch the grid.
+window.toggleFacePick = function() {
   if (isolatedIdx === null) {
     setStatus('Bitte zuerst ein Teil anklicken, um es zu isolieren', 'err');
     return;
   }
-  const mesh = partMeshes[isolatedIdx].mesh;
+  facePickArmed = !facePickArmed;
+  document.getElementById('btn-plate').classList.toggle('active', facePickArmed);
+  document.getElementById('viewport').classList.toggle('face-pick-cursor', facePickArmed);
+  setStatus(facePickArmed ? 'Klicke auf eine Fläche des Teils …' : '', facePickArmed ? 'busy' : 'ok');
+};
+
+// Re-centers geometry on its own bounding-box center so subsequent
+// rotations pivot around the object itself, not the model's original
+// (possibly far-away) coordinate origin baked into its vertex data.
+function centerMeshPivot(mesh) {
+  mesh.geometry.computeBoundingBox();
+  const localCenter = new THREE.Vector3();
+  mesh.geometry.boundingBox.getCenter(localCenter);
+  if (localCenter.lengthSq() > 1e-6) {
+    mesh.geometry.translate(-localCenter.x, -localCenter.y, -localCenter.z);
+    mesh.position.add(localCenter.applyQuaternion(mesh.quaternion));
+  }
+}
+
+function handleFacePick(event) {
+  const idx = isolatedIdx;
+  if (idx === null) return;
+  const mesh = partMeshes[idx].mesh;
+
+  const rect = renderer.domElement.getBoundingClientRect();
+  const ndc = new THREE.Vector2(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1
+  );
+  const raycaster = new THREE.Raycaster();
+  raycaster.setFromCamera(ndc, camera);
+  const hits = raycaster.intersectObject(mesh, false);
+  if (!hits.length) return;
+
+  centerMeshPivot(mesh);
+  mesh.updateMatrixWorld(true);
+
+  const worldNormal = hits[0].face.normal.clone()
+    .transformDirection(mesh.matrixWorld).normalize();
+  const down = new THREE.Vector3(0, -1, 0);
+  const rot = new THREE.Quaternion().setFromUnitVectors(worldNormal, down);
+  mesh.quaternion.premultiply(rot);
+
   const box = new THREE.Box3().setFromObject(mesh);
   mesh.position.y -= box.min.y;
+
+  facePickArmed = false;
+  document.getElementById('btn-plate').classList.remove('active');
+  document.getElementById('viewport').classList.remove('face-pick-cursor');
   fitCamera();
-};
+  setStatus('Fläche auf die Platte gelegt', 'ok');
+}
 
 // ── Split / Explode ──────────────────────────────────────────────
 let splitActive = false;
