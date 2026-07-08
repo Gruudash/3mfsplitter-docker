@@ -1,5 +1,7 @@
 # 3MF Splitter
 
+[![Docker Build Verify](https://github.com/Gruudash/3mfsplitter-docker/actions/workflows/docker-verify.yml/badge.svg)](https://github.com/Gruudash/3mfsplitter-docker/actions/workflows/docker-verify.yml)
+
 > ⚠️ **Work in Progress — nur für Testzwecke.**
 > Dieses Projekt befindet sich aktiv im Aufbau und ist **nicht** für den
 > produktiven Einsatz gedacht. Funktionen können sich jederzeit ändern,
