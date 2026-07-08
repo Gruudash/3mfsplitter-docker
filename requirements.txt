@@ -9,3 +9,4 @@ python-multipart==0.0.32
 aiofiles==25.1.0
 shapely==2.0.7
 pymeshfix==0.18.1
+python-dotenv==1.0.1

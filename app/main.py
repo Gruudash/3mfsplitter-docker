@@ -2,10 +2,13 @@
 
 import os
 
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+
+load_dotenv()
 
 from .api.routes import router
 
@@ -15,9 +18,13 @@ app = FastAPI(
     version="1.0.0",
 )
 
+_cors_origins_raw = os.environ.get("CORS_ALLOW_ORIGINS", "*")
+_cors_origins = ["*"] if _cors_origins_raw.strip() == "*" \
+    else [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )

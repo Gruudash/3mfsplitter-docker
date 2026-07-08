@@ -20,13 +20,19 @@ services:
     # demselben Host laufen.
     # container_name: 3mf-splitter
 
+    # Liest .env im selben Ordner ein (Vorlage: .env.example kopieren nach
+    # .env und anpassen). Setzt u.a. MAX_UPLOAD_MB und CORS_ALLOW_ORIGINS
+    # als Umgebungsvariablen im Container.
+    env_file:
+      - .env
+
     ports:
-      # ANPASSEN: "HOST_PORT:CONTAINER_PORT". Die LINKE Zahl ändern, falls
-      # Port 8000 auf dem Host bereits belegt ist, z.B. "8080:8000", um die
-      # App dann unter http://localhost:8080 zu erreichen. Die rechte 8000
-      # NICHT ändern, außer EXPOSE/CMD im Dockerfile und der uvicorn
-      # --port-Parameter dort werden ebenfalls angepasst.
-      - "8899:8000"
+      # ANPASSEN: HOST_PORT in der .env ändern, falls Port 8899 auf dem
+      # Host bereits belegt ist, z.B. HOST_PORT=8080, um die App dann unter
+      # http://localhost:8080 zu erreichen. Die rechte 8000 NICHT ändern,
+      # außer EXPOSE/CMD im Dockerfile und der uvicorn --port-Parameter
+      # dort werden ebenfalls angepasst.
+      - "${HOST_PORT:-8899}:8000"
 
     volumes:
       # ANPASSEN: wo hochgeladene .3mf-Dateien / exportierte STL-ZIPs auf
@@ -43,13 +49,8 @@ services:
       # Sorgt dafür, dass Python stdout/stderr ungepuffert ausgibt, damit
       # `docker compose logs` sofort etwas anzeigt. In der Regel so lassen.
       - PYTHONUNBUFFERED=1
-      # ANPASSEN (optional): die App hat aktuell keine weiteren
-      # konfigurierbaren Umgebungsvariablen (Port/Host sind fest im CMD
-      # des Dockerfiles). Falls später Konfiguration über Env-Variablen
-      # in app/main.py ergänzt wird (z.B. API-Key, CORS-Origins,
-      # Upload-Größenlimit), hier eintragen, Beispiel:
-      # - MAX_UPLOAD_MB=200
-      # - CORS_ALLOW_ORIGINS=https://example.com
+      # Weitere Variablen (MAX_UPLOAD_MB, CORS_ALLOW_ORIGINS, HOST_PORT)
+      # kommen über "env_file: .env" oben rein -- siehe .env.example.
 
     # ANPASSEN: Neustart-Verhalten. "unless-stopped" startet den Container
     # nach einem Absturz oder Host-Neustart automatisch neu, aber nicht
