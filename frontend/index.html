@@ -81,6 +81,20 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg);
 .eye-btn    { color: var(--muted); font-size: 13px; padding: 2px; cursor: pointer;
               transition: color .15s; line-height: 1; }
 .eye-btn:hover { color: var(--text); }
+.part-check { accent-color: var(--accent); cursor: pointer; flex-shrink: 0; width: 13px; height: 13px; }
+
+/* Selection / Auswahl treffen */
+#selection-list { overflow-y: auto; flex: 1; min-height: 20px; }
+.sel-row { display: flex; align-items: center; gap: 6px; padding: 4px 0; }
+.sel-row .sel-color { width: 22px; height: 22px; padding: 0; border: 1px solid var(--border);
+                       border-radius: 5px; background: none; cursor: pointer; flex-shrink: 0; }
+.sel-row .sel-label { flex: 1; min-width: 0; background: var(--surface); border: 1px solid var(--border);
+                       border-radius: 5px; color: var(--text); font-size: 11px; padding: 3px 6px; outline: none; }
+.sel-row .sel-label:focus { border-color: var(--accent); }
+.sel-count  { font-size: 10px; color: var(--muted); white-space: nowrap; flex-shrink: 0; }
+.sel-remove { color: var(--muted); cursor: pointer; font-size: 15px; padding: 0 3px; line-height: 1; flex-shrink: 0; }
+.sel-remove:hover { color: var(--error); }
+.sel-empty, .sel-hint { font-size: 10.5px; color: var(--muted); line-height: 1.4; padding: 4px 2px; }
 
 /* Options */
 .radio-group { display: flex; flex-direction: column; gap: 5px; }
@@ -196,6 +210,13 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg);
       <div id="parts-list"></div>
     </div>
 
+    <!-- Auswahl treffen (manuelle Trennstellen vor dem Split) -->
+    <div class="sb-section" style="max-height:220px;display:flex;flex-direction:column;overflow:hidden;">
+      <div class="sb-label">Auswahl treffen</div>
+      <div id="selection-list"></div>
+      <div class="sel-hint">Rest bleibt automatisch zusammen. Ohne Auswahl: automatischer Farb-Split (altes Verhalten).</div>
+    </div>
+
     <!-- Connector options -->
     <div class="sb-section">
       <div class="sb-label">Verbindungstyp</div>
@@ -258,6 +279,7 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg);
       <button class="tb-btn" id="btn-fit"  onclick="fitCamera()"        title="Kamera einpassen">Einpassen</button>
       <button class="tb-btn"               onclick="resetCamera()"       title="Kamera reset">Reset</button>
       <button class="tb-btn" id="btn-plate" onclick="toggleFacePick()"  title="Fläche des isolierten Teils anklicken, um sie auf die Platte zu legen">⬇ Ebene wählen</button>
+      <button class="tb-btn" id="btn-region" onclick="toggleRegionPick()" title="Zusammenhängenden Bereich anklicken und als eigene Trennstelle hinzufügen (unabhängig von Farbgrenzen)">✂ Bereich auswählen</button>
     </div>
     <div id="vp-info"></div>
     <div id="explode-wrap" style="display:none">
@@ -295,6 +317,13 @@ let fallbackUrl   = null; // last split's downloadable blob URL, if any
 let explodeFactor = 0;
 let facePickArmed = false;
 let faceHighlight = null;
+let regionPickArmed = false;
+// Manuelle Auswahl-Stufe: jede Gruppe wird 1:1 als Trennstelle ans Backend
+// geschickt (POST /api/split, Feld "selection"). source 'checkbox' spiegelt
+// die Farbteile-Liste, 'freehand' kommt vom "✂ Bereich auswählen"-Werkzeug.
+// { key, label, color, source, objectId, faceIndices, partIdx }
+let selectionGroups   = [];
+let selectionCounter  = 0;
 
 // ── Three.js setup ───────────────────────────────────────────────
 function initThree() {
@@ -333,10 +362,11 @@ function initThree() {
     if (!down) return;
     if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) return; // was a drag, not a click
     if (facePickArmed) { handleFacePick(e); return; }
+    if (regionPickArmed) { handleRegionPick(e); return; }
     handleViewportSelect(e);
   });
   renderer.domElement.addEventListener('pointermove', e => {
-    if (facePickArmed) updateFaceHighlight(e);
+    if (facePickArmed || regionPickArmed) updateFaceHighlight(e);
   });
   renderer.domElement.addEventListener('pointerleave', () => setFaceHighlightVisible(false));
 
@@ -407,6 +437,55 @@ const AUTO_PALETTE = [
 
 function localName(el) {
   return (el.localName || el.tagName).split(':').pop();
+}
+
+// Decode a Bambu/PrusaSlicer 'paint_color' triangle attribute into an
+// extruder index (1-based), or null if the dominant state is "not
+// painted" (0) and the triangle's already-resolved color should stand.
+// Mirrors _decode_paint_color() in app/core/parser.py -- see that
+// docstring for the reverse-engineered bit-format details and the
+// majority-vote approximation used for recursively split (finely painted)
+// triangles.
+function decodePaintColor(paintColor) {
+  try {
+    const bits = [];
+    for (let i = paintColor.length - 1; i >= 0; i--) {
+      const v = parseInt(paintColor[i], 16);
+      if (Number.isNaN(v)) return null;
+      for (let b = 0; b < 4; b++) bits.push((v >> b) & 1);
+    }
+    let pos = 0;
+    const readNibble = () => {
+      let n = 0;
+      for (let i = 0; i < 4; i++) { n |= bits[pos] << i; pos++; }
+      return n;
+    };
+    const parseNode = () => {
+      const code = readNibble();
+      const splitSides = code & 0b11;
+      if (splitSides === 0) {
+        if ((code & 0b1100) === 0b1100) {
+          let num = 0;
+          let nextCode = readNibble();
+          while (nextCode === 0b1111) { num++; nextCode = readNibble(); }
+          return [nextCode + 15 * num + 3];
+        }
+        return [code >> 2];
+      }
+      const states = [];
+      for (let c = 0; c <= splitSides; c++) states.push(...parseNode());
+      return states;
+    };
+    const states = parseNode();
+    if (!states.length) return null;
+    const counts = new Map();
+    for (const s of states) counts.set(s, (counts.get(s) || 0) + 1);
+    let best = null, bestCount = -1;
+    for (const [s, c] of counts) if (c > bestCount) { best = s; bestCount = c; }
+    return best > 0 ? best : null;
+  } catch (e) {
+    return null;
+  }
 }
 
 // ── Metadata readers ─────────────────────────────────────────────────────
@@ -581,13 +660,14 @@ async function parse3mf(file) {
       const objP1   = obj.getAttribute('p1');
 
       // Default color: colorgroup > direct attr > extruder metadata > gray
+      // (applied lowest-priority-first so each later check overrides the last)
       let defaultColor = '#808080';
-      if (objPid && objP1 && colorGroups[objPid])
-        defaultColor = colorGroups[objPid][parseInt(objP1)] || defaultColor;
-      const directCol = obj.getAttribute('color');
-      if (directCol) defaultColor = directCol;
       if (objectExtruders[objId] && extruderColors[objectExtruders[objId]])
         defaultColor = extruderColors[objectExtruders[objId]];
+      const directCol = obj.getAttribute('color');
+      if (directCol) defaultColor = directCol;
+      if (objPid && objP1 && colorGroups[objPid])
+        defaultColor = colorGroups[objPid][parseInt(objP1)] || defaultColor;
 
       // Find mesh
       let meshEl = null;
@@ -630,17 +710,13 @@ async function parse3mf(file) {
         if (pid && p1 && colorGroups[pid])
           color = colorGroups[pid][parseInt(p1)] || color;
 
-        // Bambu / Creality paint_color attribute (upper nibble = MMU extruder index)
+        // Bambu paint_color attribute: recursive per-triangle MMU paint
+        // state, decoded via decodePaintColor(). A dominant state of 0
+        // (unpainted) keeps the color already resolved above.
         const paintColor = tri.getAttribute('paint_color');
         if (paintColor && Object.keys(extruderColors).length) {
-          try {
-            const hex2 = paintColor.length >= 2 ? paintColor.slice(0,2) : ('0' + paintColor);
-            const firstByte = parseInt(hex2, 16);
-            const mmuIdx = (firstByte >> 4) & 0xF;
-            const baseExt = objectExtruders[objId] || '1';
-            const extKey = mmuIdx > 0 ? String(mmuIdx) : baseExt;
-            if (extruderColors[extKey]) color = extruderColors[extKey];
-          } catch(e) {}
+          const extNum = decodePaintColor(paintColor);
+          if (extNum != null && extruderColors[String(extNum)]) color = extruderColors[String(extNum)];
         }
 
         // PrusaSlicer volume range overrides per face index
@@ -649,14 +725,20 @@ async function parse3mf(file) {
         }
 
         const key = color.toLowerCase();
-        if (!colorFaces[key]) colorFaces[key] = { color: key, faces: [] };
+        if (!colorFaces[key]) colorFaces[key] = { color: key, faces: [], origIndices: [] };
         colorFaces[key].faces.push([v1, v2, v3]);
+        // faceIdx here is the 0-based position of this <triangle> within the
+        // object's <triangles> list, in document order -- identical to the
+        // face_idx counter the backend uses (app/core/parser.py). This is
+        // what lets us send face_indices back to /api/split unambiguously.
+        colorFaces[key].origIndices.push(faceIdx);
         faceIdx++;
       }
 
       for (const [hex, group] of Object.entries(colorFaces))
         parts.push({ name: `${objName}_${hex}`, displayName: objName,
-                     color: hex, vertices: verts, faces: group.faces });
+                     color: hex, vertices: verts, faces: group.faces,
+                     objectId: objId, origIndices: group.origIndices });
     }
   }
 
@@ -669,9 +751,10 @@ async function parse3mf(file) {
 
   // Fill open boundary holes on each color part
   for (const p of parts) {
-    const filled = fillHoles(p.vertices, p.faces);
-    p.vertices = filled.vertices;
-    p.faces    = filled.faces;
+    const filled = fillHoles(p.vertices, p.faces, p.origIndices);
+    p.vertices    = filled.vertices;
+    p.faces       = filled.faces;
+    p.origIndices = filled.origIndices;
   }
 
   return parts;
@@ -680,7 +763,13 @@ async function parse3mf(file) {
 // ── Hole filling (boundary-edge → fan triangulation) ─────────────────────────
 // Closes the open cuts left when splitting a mesh by color.
 // Each boundary loop is capped by fan triangles from its centroid.
-function fillHoles(vertices, faces) {
+// origIndices (optional) is a parallel array mapping faces[i] -> its 0-based
+// index in the original <triangles> document order. Synthetic cap faces
+// added here don't exist in the original mesh, so they get -1 in the
+// returned origIndices -- callers (the freehand region-select tool) must
+// treat -1 as "not selectable / not sendable to the backend".
+function fillHoles(vertices, faces, origIndices) {
+  const origIdx = origIndices || faces.map(() => -1);
   // Count how many times each undirected edge appears
   const edgeCnt = new Map();
   for (const [i0, i1, i2] of faces) {
@@ -701,7 +790,7 @@ function fillHoles(vertices, faces) {
     }
   }
 
-  if (nextVert.size === 0) return { vertices, faces }; // already closed
+  if (nextVert.size === 0) return { vertices, faces, origIndices: origIdx }; // already closed
 
   // Chain directed edges into closed boundary loops
   const visited = new Set();
@@ -720,11 +809,12 @@ function fillHoles(vertices, faces) {
     if (loop.length >= 3) loops.push(loop);
   }
 
-  if (loops.length === 0) return { vertices, faces };
+  if (loops.length === 0) return { vertices, faces, origIndices: origIdx };
 
   // Cap each loop: fan from centroid
   const newVerts = vertices.map(v => [...v]); // shallow copy
   const newFaces = faces.map(f => [...f]);
+  const newOrigIndices = origIdx.slice();
 
   for (const loop of loops) {
     // Compute centroid of the loop vertices
@@ -742,10 +832,11 @@ function fillHoles(vertices, faces) {
       const v0 = loop[i];
       const v1 = loop[(i + 1) % n];
       newFaces.push([ci, v0, v1]);
+      newOrigIndices.push(-1); // synthetic cap face -- no original face index
     }
   }
 
-  return { vertices: newVerts, faces: newFaces };
+  return { vertices: newVerts, faces: newFaces, origIndices: newOrigIndices };
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -764,23 +855,36 @@ function buildAssembledMesh(parts) {
   const positions = new Float32Array(totalTris * 9);
   const normals   = new Float32Array(totalTris * 9);
   const colors    = new Float32Array(totalTris * 9);
+  // Reverse mapping: assembled-mesh triangle index -> which part it came
+  // from + its local index within that part's p.faces. Parts are appended
+  // one after another (no interleaving, no reordering within a part), so
+  // this is a straightforward parallel array built during the same loop.
+  // Needed so a freehand click on the ASSEMBLED view can resolve a hit
+  // triangle back to (objectId, origFaceIndex) for the /api/split "selection".
+  const faceOwnerPart  = new Int32Array(totalTris);
+  const faceOwnerLocal = new Int32Array(totalTris);
   let ptr = 0;
+  let triPtr = 0;
 
-  for (const p of parts) {
+  parts.forEach((p, partIdx) => {
     let [r, g, b] = hexToRgbF(p.color);
     // Lift dark colors: mix 22% white so #000 becomes visible dark gray
     r = r * 0.78 + 0.22;
     g = g * 0.78 + 0.22;
     b = b * 0.78 + 0.22;
-    for (const [i0, i1, i2] of p.faces) {
+    p.faces.forEach((face, localIdx) => {
+      const [i0, i1, i2] = face;
       for (const vi of [i0, i1, i2]) {
         const v = p.vertices[vi];
         positions[ptr*3] = v[0]; positions[ptr*3+1] = v[1]; positions[ptr*3+2] = v[2];
         colors[ptr*3]    = r;    colors[ptr*3+1]    = g;    colors[ptr*3+2]    = b;
         ptr++;
       }
-    }
-  }
+      faceOwnerPart[triPtr]  = partIdx;
+      faceOwnerLocal[triPtr] = localIdx;
+      triPtr++;
+    });
+  });
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -788,12 +892,15 @@ function buildAssembledMesh(parts) {
   geo.computeVertexNormals();
 
   // MeshStandardMaterial gives PBR shading while still showing per-vertex colors
-  return new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+  const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
     vertexColors: true,
     roughness: 0.65,
     metalness: 0.05,
     side: THREE.DoubleSide,
   }));
+  mesh.userData.faceOwnerPart  = faceOwnerPart;
+  mesh.userData.faceOwnerLocal = faceOwnerLocal;
+  return mesh;
 }
 
 // Split: one solid-color mesh per color part (for explode view)
@@ -887,7 +994,10 @@ window.loadModel = async function(file) {
     fitCamera();
     setProgress(100);
 
+    selectionGroups  = [];
+    selectionCounter = 0;
     renderPartsList();
+    renderSelectionList();
     updateVpInfo();
     const totalFaces = currentParts.reduce((s, p) => s + p.faces.length, 0);
     setStatus(currentParts.length + ' Farben · ' + totalFaces.toLocaleString() + ' Dreiecke', 'ok');
@@ -910,7 +1020,9 @@ function renderPartsList() {
     row.className = 'part-row';
     row.dataset.idx = i;
     const faceLabel = currentParts[i] ? currentParts[i].faces.length.toLocaleString() + ' Fl.' : '';
+    const checked = selectionGroups.some(g => g.source === 'checkbox' && g.partIdx === i);
     row.innerHTML =
+      '<input type="checkbox" class="part-check" title="Als eigene Trennstelle auswählen"' + (checked ? ' checked' : '') + '>' +
       '<div class="color-swatch" style="background:' + p.color + '"></div>' +
       '<div style="flex:1;min-width:0">' +
         '<div class="part-label">' + (p.name.replace(/_#[0-9a-fA-F]+$/, '') || 'Teil '+(i+1)) + '</div>' +
@@ -918,12 +1030,107 @@ function renderPartsList() {
       '</div>' +
       '<span class="eye-btn" title="Ein/Ausblenden">👁</span>';
 
+    row.querySelector('.part-check').addEventListener('click', e => {
+      e.stopPropagation();
+      toggleCandidateSelection(i, e.target.checked);
+    });
     row.querySelector('.eye-btn').addEventListener('click', e => {
       e.stopPropagation(); togglePart(i, row);
     });
     row.addEventListener('click', () => isolatePart(i));
     list.appendChild(row);
   });
+}
+
+// ── Auswahl treffen: Checkbox-Kandidaten + Freihand-Gruppen ──────────────
+
+// Face-Indizes, die bereits einer ANDEREN Gruppe desselben Objekts gehören.
+// Der Backend-Endpunkt lehnt überlappende Gruppen jetzt mit HTTP 400 ab
+// (siehe dev-log) -- das hier verhindert diese Fehlermeldung proaktiv in
+// der UI, statt den Nutzer erst beim Export damit zu konfrontieren.
+function claimedFaceIndices(objectId, excludeKey) {
+  const claimed = new Set();
+  for (const g of selectionGroups) {
+    if (g.objectId !== objectId || g.key === excludeKey) continue;
+    for (const f of g.faceIndices) claimed.add(f);
+  }
+  return claimed;
+}
+
+// Checkbox angehakt -> Farbregion wird als Trennstellen-Gruppe übernommen
+// (alle ihre origIndices, ohne Füll-Flächen mit -1, abzüglich Faces, die
+// schon einer anderen Gruppe -- z.B. einer Freihand-Auswahl -- gehören).
+function toggleCandidateSelection(partIdx, isChecked) {
+  if (isChecked) {
+    const part = currentParts[partIdx];
+    if (!part) return;
+    const key = 'part-' + partIdx;
+    const claimed = claimedFaceIndices(part.objectId, key);
+    const allIndices = (part.origIndices || []).filter(v => v >= 0);
+    const faceIndices = allIndices.filter(v => !claimed.has(v));
+    if (!faceIndices.length) {
+      setStatus('Diese Farbregion überschneidet sich komplett mit einer bereits gewählten Trennstelle', 'err');
+      const box = document.querySelector('.part-row[data-idx="' + partIdx + '"] .part-check');
+      if (box) box.checked = false;
+      return;
+    }
+    selectionGroups.push({
+      key,
+      label: part.displayName || part.name || ('Teil ' + (partIdx + 1)),
+      color: part.color,
+      source: 'checkbox',
+      objectId: part.objectId,
+      faceIndices,
+      partIdx,
+    });
+    if (faceIndices.length < allIndices.length) {
+      setStatus('Hinzugefügt -- Überschneidung mit bestehender Auswahl wurde automatisch ausgeschlossen', 'ok');
+    }
+  } else {
+    selectionGroups = selectionGroups.filter(g => !(g.source === 'checkbox' && g.partIdx === partIdx));
+  }
+  renderSelectionList();
+}
+
+// Renders the "Ausgewählte Trennstellen" list: editable label, color picker
+// (Einfärben-Schritt -- label/Legende only, the STL itself stays colorless)
+// and a remove button, for every group regardless of whether it came from a
+// checkbox or the freehand tool.
+function renderSelectionList() {
+  const wrap = document.getElementById('selection-list');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+
+  if (!selectionGroups.length) {
+    wrap.innerHTML = '<div class="sel-empty">Noch keine Trennstelle gewählt — ohne Auswahl wird beim Splitten automatisch nach Farbe getrennt.</div>';
+    return;
+  }
+
+  selectionGroups.forEach(g => {
+    const row = document.createElement('div');
+    row.className = 'sel-row';
+    const safeLabel = g.label.replace(/"/g, '&quot;');
+    row.innerHTML =
+      '<input type="color" class="sel-color" value="' + g.color + '" title="Farbe (nur Label/Legende, STL bleibt farblos)">' +
+      '<input type="text" class="sel-label" value="' + safeLabel + '" title="Bezeichnung">' +
+      '<span class="sel-count">' + g.faceIndices.length.toLocaleString() + ' Fl.</span>' +
+      '<span class="sel-remove" title="Entfernen">&times;</span>';
+
+    row.querySelector('.sel-color').addEventListener('input', e => { g.color = e.target.value; });
+    row.querySelector('.sel-label').addEventListener('input', e => { g.label = e.target.value; });
+    row.querySelector('.sel-remove').addEventListener('click', () => removeSelectionGroup(g));
+    wrap.appendChild(row);
+  });
+}
+
+function removeSelectionGroup(g) {
+  selectionGroups = selectionGroups.filter(x => x !== g);
+  if (g.source === 'checkbox' && g.partIdx !== null) {
+    const row = document.querySelectorAll('.part-row')[g.partIdx];
+    const cb = row && row.querySelector('.part-check');
+    if (cb) cb.checked = false;
+  }
+  renderSelectionList();
 }
 
 function togglePart(idx, row) {
@@ -1013,10 +1220,34 @@ window.toggleFacePick = function() {
     return;
   }
   facePickArmed = !facePickArmed;
+  if (facePickArmed && regionPickArmed) {
+    regionPickArmed = false;
+    document.getElementById('btn-region').classList.remove('active');
+  }
   document.getElementById('btn-plate').classList.toggle('active', facePickArmed);
-  document.getElementById('viewport').classList.toggle('face-pick-cursor', facePickArmed);
+  document.getElementById('viewport').classList.toggle('face-pick-cursor', facePickArmed || regionPickArmed);
   if (!facePickArmed) setFaceHighlightVisible(false);
   setStatus(facePickArmed ? 'Klicke auf eine Fläche …' : '', facePickArmed ? 'busy' : 'ok');
+};
+
+// ── Freihand-Bereichsauswahl (manuelle Trennstelle, unabhängig von Farbe) ──
+// Armiert/deaktiviert einen zweiten, zu "Ebene wählen" parallelen Klick-Modus:
+// statt das Modell zu rotieren, wird die angeklickte zusammenhängende
+// (koplanare) Fläche als neue Gruppe in "Auswahl treffen" aufgenommen.
+window.toggleRegionPick = function() {
+  if (isolatedIdx === null && !(assembledMesh && assembledMesh.visible)) {
+    setStatus('Bitte ein Teil isolieren oder die zusammengesetzte Ansicht anzeigen', 'err');
+    return;
+  }
+  regionPickArmed = !regionPickArmed;
+  if (regionPickArmed && facePickArmed) {
+    facePickArmed = false;
+    document.getElementById('btn-plate').classList.remove('active');
+  }
+  document.getElementById('btn-region').classList.toggle('active', regionPickArmed);
+  document.getElementById('viewport').classList.toggle('face-pick-cursor', facePickArmed || regionPickArmed);
+  if (!regionPickArmed) setFaceHighlightVisible(false);
+  setStatus(regionPickArmed ? 'Klicke auf eine Fläche, um sie als Trennstelle zu markieren …' : '', regionPickArmed ? 'busy' : 'ok');
 };
 
 // Rotates *object* around an arbitrary WORLD-space pivot (its own local
@@ -1053,6 +1284,27 @@ function getFaceAdjacency(mesh) {
   const triCount = (idx ? idx.count : pos.count) / 3;
   const vi = (f, k) => idx ? idx.getX(f * 3 + k) : f * 3 + k;
 
+  // buildAssembledMesh()/buildSplitMesh() both emit NON-INDEXED geometry --
+  // every triangle corner gets its own private slot in the position buffer,
+  // even where two triangles touch at what is geometrically the same
+  // vertex. Keying adjacency by raw buffer-slot number (as a naive
+  // `geo.index`-based edge map would) therefore NEVER matches between two
+  // different triangles, and collectCoplanarRegion() would silently
+  // degenerate to "just the one clicked triangle" for every mesh in this
+  // app. Instead, key each corner by its quantized (x,y,z) position so
+  // coincident vertices across triangles resolve to the same canonical id
+  // regardless of indexing.
+  const QUANT = 1e4; // ~1e-4 unit position-snap tolerance
+  const vertKey = new Map();
+  const canonical = (i) => {
+    const key = Math.round(pos.getX(i) * QUANT) + '_' +
+                Math.round(pos.getY(i) * QUANT) + '_' +
+                Math.round(pos.getZ(i) * QUANT);
+    let id = vertKey.get(key);
+    if (id === undefined) { id = vertKey.size; vertKey.set(key, id); }
+    return id;
+  };
+
   const edgeMap = new Map();
   const addEdge = (a, b, tri) => {
     const key = a < b ? a + '_' + b : b + '_' + a;
@@ -1061,13 +1313,20 @@ function getFaceAdjacency(mesh) {
     arr.push(tri);
   };
   for (let f = 0; f < triCount; f++) {
-    const a = vi(f, 0), b = vi(f, 1), c = vi(f, 2);
+    const a = canonical(vi(f, 0)), b = canonical(vi(f, 1)), c = canonical(vi(f, 2));
     addEdge(a, b, f); addEdge(b, c, f); addEdge(c, a, f);
   }
   const adjacency = new Array(triCount);
   for (let f = 0; f < triCount; f++) adjacency[f] = [];
   for (const arr of edgeMap.values()) {
-    if (arr.length === 2) { adjacency[arr[0]].push(arr[1]); adjacency[arr[1]].push(arr[0]); }
+    // Normally exactly 2 triangles share a manifold edge; connect every
+    // pair for the rare non-manifold/seam case (e.g. hole-cap fans) instead
+    // of dropping the edge entirely.
+    for (let x = 0; x < arr.length; x++)
+      for (let y = x + 1; y < arr.length; y++) {
+        adjacency[arr[x]].push(arr[y]);
+        adjacency[arr[y]].push(arr[x]);
+      }
   }
 
   const normals = new Array(triCount);
@@ -1189,6 +1448,97 @@ function handleFacePick(event) {
   setStatus('Fläche auf die Platte gelegt', 'ok');
 }
 
+// ── Freihand-Bereichsauswahl: Klick → Trennstellen-Gruppe ────────────────
+// Resolves a local triangle index on `pickMesh` (either the assembled mesh
+// or one isolated part's split mesh) back to the raw (objectId,
+// origFaceIndex) pair the backend understands. Returns null for triangles
+// that don't map to a real 3MF triangle (the synthetic hole-cap faces
+// fillHoles() adds get origIndices === -1).
+function resolveOrigFace(pickMesh, localFaceIndex) {
+  if (pickMesh === assembledMesh) {
+    const partIdx = pickMesh.userData.faceOwnerPart[localFaceIndex];
+    const partLocal = pickMesh.userData.faceOwnerLocal[localFaceIndex];
+    const part = currentParts[partIdx];
+    if (!part) return null;
+    const orig = part.origIndices[partLocal];
+    if (orig === undefined || orig < 0) return null;
+    return { objectId: part.objectId, origFaceIndex: orig };
+  }
+  if (isolatedIdx !== null && pickMesh === partMeshes[isolatedIdx].mesh) {
+    const part = currentParts[isolatedIdx];
+    if (!part) return null;
+    // buildSplitMesh() writes part.faces into the geometry in the same
+    // order, unfiltered -- so localFaceIndex here is directly the index
+    // into part.faces / part.origIndices.
+    const orig = part.origIndices[localFaceIndex];
+    if (orig === undefined || orig < 0) return null;
+    return { objectId: part.objectId, origFaceIndex: orig };
+  }
+  return null;
+}
+
+function handleRegionPick(event) {
+  const pickMesh = currentPickMesh();
+  if (!pickMesh) return;
+
+  const rect = renderer.domElement.getBoundingClientRect();
+  const ndc = new THREE.Vector2(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1
+  );
+  const raycaster = new THREE.Raycaster();
+  raycaster.setFromCamera(ndc, camera);
+  const hits = raycaster.intersectObject(pickMesh, false);
+  if (!hits.length) return;
+
+  const region = collectCoplanarRegion(pickMesh, hits[0].faceIndex);
+
+  const byObject = new Map(); // objectId -> Set<origFaceIndex>
+  let resolvedCount = 0;
+  for (const f of region) {
+    const resolved = resolveOrigFace(pickMesh, f);
+    if (!resolved) continue;
+    resolvedCount++;
+    if (!byObject.has(resolved.objectId)) byObject.set(resolved.objectId, new Set());
+    byObject.get(resolved.objectId).add(resolved.origFaceIndex);
+  }
+
+  if (!byObject.size) {
+    setStatus('Keine gültige Fläche erkannt (nur Füll-Flächen getroffen)', 'err');
+    return;
+  }
+
+  selectionCounter++;
+  const multiObject = byObject.size > 1;
+  let addedGroups = 0;
+  let skippedOverlap = 0;
+  for (const [objectId, faceSet] of byObject) {
+    const claimed = claimedFaceIndices(objectId, null);
+    const faceIndices = [...faceSet].filter(f => !claimed.has(f));
+    skippedOverlap += faceSet.size - faceIndices.length;
+    if (!faceIndices.length) continue;
+    selectionGroups.push({
+      key: 'sel-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7),
+      label: 'Auswahl ' + selectionCounter + (multiObject ? ` (Objekt ${objectId})` : ''),
+      color: AUTO_PALETTE[(currentParts.length + selectionGroups.length) % AUTO_PALETTE.length],
+      source: 'freehand',
+      objectId,
+      faceIndices,
+      partIdx: null,
+    });
+    addedGroups++;
+  }
+
+  renderSelectionList();
+  if (!addedGroups) {
+    setStatus('Fläche überschneidet sich komplett mit einer bereits gewählten Trennstelle', 'err');
+  } else if (skippedOverlap > 0) {
+    setStatus('Bereich hinzugefügt: ' + resolvedCount.toLocaleString() + ' Dreiecke (' + skippedOverlap + ' bereits ausgewählt, ausgeschlossen)', 'ok');
+  } else {
+    setStatus('Bereich hinzugefügt: ' + resolvedCount.toLocaleString() + ' Dreiecke', 'ok');
+  }
+}
+
 // ── Split / Explode ──────────────────────────────────────────────
 let splitActive = false;
 
@@ -1291,6 +1641,30 @@ window.doSplit = async function() {
     fd.append('connector', connector);
     fd.append('n_connectors', nConnectors);
     collectConnParams(fd, connector);
+
+    // Manuelle Auswahl-Stufe: nur anhängen, wenn der Nutzer wirklich etwas
+    // ausgewählt hat (Checkbox-Kandidat oder Freihand-Bereich). Ohne
+    // Auswahl bleibt das Feld weg -> Backend fällt auf den alten
+    // automatischen Farb-Split zurück (split_by_color), exakt wie vorher.
+    // KRITISCH: Key ist die rohe 3MF object_id (z.B. "1"), NICHT ein
+    // zusammengesetzter Name -- eine falsche Zuordnung würde die Auswahl
+    // beim Backend-Aufruf stillschweigend verwerfen.
+    if (selectionGroups.length) {
+      const bySelectionObj = {};
+      for (const g of selectionGroups) {
+        if (!g.objectId || !g.faceIndices.length) continue;
+        if (!bySelectionObj[g.objectId]) bySelectionObj[g.objectId] = [];
+        bySelectionObj[g.objectId].push({
+          label: g.label || 'Trennstelle',
+          face_indices: g.faceIndices,
+          color_hex: g.color,
+        });
+      }
+      if (Object.keys(bySelectionObj).length) {
+        fd.append('selection', JSON.stringify(bySelectionObj));
+      }
+    }
+
     // Whole-model orientation chosen in the viewer via "place on plate"
     // (identity quaternion if the user never used that tool -> no-op server-side)
     if (modelGroup) {

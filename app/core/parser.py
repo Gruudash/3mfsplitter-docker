@@ -14,6 +14,7 @@ import json
 import re
 import zipfile
 import xml.etree.ElementTree as ET
+from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
 
@@ -50,6 +51,67 @@ def _hex_to_rgba(hex_str: str) -> RGBA:
 def _local_tag(elem) -> str:
     tag = elem.tag
     return tag.split("}")[-1] if "}" in tag else tag
+
+
+def _decode_paint_color(paint_color: str) -> Optional[int]:
+    """Decode a Bambu/PrusaSlicer 'paint_color' triangle attribute into an
+    extruder index (1-based), or None if the dominant state is "not
+    painted" (0) and the triangle's already-resolved color should stand.
+
+    Format reverse-engineered from BambuStudio's
+    FacetsAnnotation::set_triangle_from_string / TriangleSelector::(de)serialize
+    (libslic3r/Model.cpp): the string is hex digits read right-to-left, each
+    expanding to 4 bits (LSB first) appended to a bitstream. The bitstream is
+    a tree, one node per 4-bit nibble: the low 2 bits give split_sides (0 =
+    leaf, otherwise split_sides+1 children follow, depth-first); a leaf's
+    state is either its top 2 bits directly (state < 3) or, when both top
+    bits are 1, an extended value read from following nibbles (0xF-chained,
+    +3 offset). State 0 = unpainted; state N>=1 = ExtruderN.
+
+    A triangle can be recursively subdivided for fine detail painting. We
+    don't reproduce the sub-triangle geometry, so as an approximation we
+    return whichever state covers the largest share of the leaves.
+    """
+    try:
+        bits: List[int] = []
+        for ch in reversed(paint_color):
+            v = int(ch, 16)
+            bits.extend((v >> i) & 1 for i in range(4))
+
+        pos = 0
+
+        def read_nibble() -> int:
+            nonlocal pos
+            n = 0
+            for i in range(4):
+                n |= bits[pos] << i
+                pos += 1
+            return n
+
+        def parse_node() -> List[int]:
+            code = read_nibble()
+            split_sides = code & 0b11
+            if split_sides == 0:
+                if (code & 0b1100) == 0b1100:
+                    num = 0
+                    next_code = read_nibble()
+                    while next_code == 0b1111:
+                        num += 1
+                        next_code = read_nibble()
+                    return [next_code + 15 * num + 3]
+                return [code >> 2]
+            states: List[int] = []
+            for _ in range(split_sides + 1):
+                states.extend(parse_node())
+            return states
+
+        states = parse_node()
+        if not states:
+            return None
+        dominant, _ = Counter(states).most_common(1)[0]
+        return dominant if dominant > 0 else None
+    except (ValueError, IndexError):
+        return None
 
 
 # -- Slicer-specific metadata readers -----------------------------------------
@@ -249,21 +311,22 @@ def _parse_model_xml(
         obj_p1 = obj.get("p1")
 
         # Priority: standard colorgroup > direct color attr > extruder metadata > gray
+        # (applied lowest-priority-first so each later check overrides the last)
         default_color: RGBA = DEFAULT_COLOR
+
+        ext_num = object_extruders.get(obj_id)
+        if ext_num and ext_num in extruder_colors:
+            default_color = _hex_to_rgba(extruder_colors[ext_num])
+
+        raw_color_attr = obj.get("color")
+        if raw_color_attr:
+            default_color = _hex_to_rgba(raw_color_attr)
 
         if obj_pid and obj_p1 and obj_pid in color_groups:
             idx = int(obj_p1)
             cg = color_groups[obj_pid]
             if 0 <= idx < len(cg):
                 default_color = cg[idx]
-
-        raw_color_attr = obj.get("color")
-        if raw_color_attr:
-            default_color = _hex_to_rgba(raw_color_attr)
-
-        ext_num = object_extruders.get(obj_id)
-        if ext_num and ext_num in extruder_colors:
-            default_color = _hex_to_rgba(extruder_colors[ext_num])
 
         # Find <mesh>
         mesh_elem: Optional[ET.Element] = None
@@ -298,7 +361,6 @@ def _parse_model_xml(
             continue
 
         vol_ranges = volume_ranges.get(obj_id, [])
-        base_extruder = object_extruders.get(obj_id, "1")
 
         raw_faces = []
         raw_colors = []
@@ -322,17 +384,14 @@ def _parse_model_xml(
                 if 0 <= idx < len(cg):
                     color = cg[idx]
 
-            # Bambu / Creality paint_color attribute (hex, upper nibble = extruder index)
+            # Bambu paint_color attribute: recursive per-triangle MMU paint
+            # state, decoded via _decode_paint_color(). A dominant state of
+            # 0 (unpainted) keeps the color already resolved above.
             paint_color = tri.get("paint_color")
             if paint_color and extruder_colors:
-                try:
-                    first_byte = int(paint_color[:2], 16)
-                    mmu_idx = (first_byte >> 4) & 0xF
-                    ext_key = str(mmu_idx) if mmu_idx > 0 else base_extruder
-                    if ext_key in extruder_colors:
-                        color = _hex_to_rgba(extruder_colors[ext_key])
-                except (ValueError, IndexError):
-                    pass
+                paint_ext_num = _decode_paint_color(paint_color)
+                if paint_ext_num is not None and str(paint_ext_num) in extruder_colors:
+                    color = _hex_to_rgba(extruder_colors[str(paint_ext_num)])
 
             # PrusaSlicer volume face ranges
             for rng in vol_ranges:

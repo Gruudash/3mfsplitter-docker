@@ -1,19 +1,64 @@
 """FastAPI route definitions for the 3MF splitter."""
 
 import io
+import json
 import os
 import tempfile
-from typing import Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field, ValidationError
 
 from ..core.connectors import ConnectorType, apply_connectors
 from ..core.exporter import export_parts_as_zip
 from ..core.parser import apply_rotation, parse_3mf
-from ..core.splitter import DEFAULT_MERGE_GAP_MM, split_by_color
+from ..core.splitter import DEFAULT_MERGE_GAP_MM, split_by_color, split_by_selection
 
 router = APIRouter()
+
+MAX_UPLOAD_MB = float(os.environ.get("MAX_UPLOAD_MB", "200"))
+
+# Bounds for the untrusted 'selection' form field (JSON text, not covered by
+# MAX_UPLOAD_MB, which only bounds the uploaded file itself). Generous for
+# any real manual selection, but bounded so a crafted payload can't blow up
+# memory/CPU before reaching mesh processing.
+MAX_SELECTION_JSON_CHARS = 2_000_000
+MAX_SELECTION_GROUPS_PER_OBJECT = 200
+MAX_FACE_INDICES_PER_GROUP = 500_000
+
+
+class SelectionGroup(BaseModel):
+    label: str = Field(default="", max_length=80)
+    face_indices: List[int] = Field(..., max_length=MAX_FACE_INDICES_PER_GROUP)
+    color_hex: Optional[str] = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
+
+
+def _parse_selection(selection: str) -> Dict[str, List[dict]]:
+    """Validate the 'selection' form field and return {object_id: [group dict, ...]}.
+    Raises HTTPException(400) on any malformed input -- this is untrusted
+    client input, so nothing here may raise an uncaught 500."""
+    if len(selection) > MAX_SELECTION_JSON_CHARS:
+        raise HTTPException(400, "selection payload too large")
+    try:
+        raw = json.loads(selection)
+    except json.JSONDecodeError:
+        raise HTTPException(400, "Invalid 'selection' JSON")
+    if not isinstance(raw, dict):
+        raise HTTPException(400, "'selection' must be a JSON object keyed by object_id")
+
+    parsed: Dict[str, List[dict]] = {}
+    try:
+        for object_id, groups in raw.items():
+            if not isinstance(groups, list) or len(groups) > MAX_SELECTION_GROUPS_PER_OBJECT:
+                raise HTTPException(400, f"invalid group list for object '{object_id}'")
+            parsed[object_id] = [g.model_dump() for g in
+                                  (SelectionGroup(**group) for group in groups)]
+    except ValidationError as e:
+        raise HTTPException(400, f"Invalid selection group: {e}")
+    except (TypeError, AttributeError):
+        raise HTTPException(400, "Invalid 'selection' JSON")
+    return parsed
 
 
 @router.get("/health")
@@ -29,7 +74,7 @@ async def file_info(
     """Return metadata about a .3mf file without splitting it."""
     _require_3mf(file.filename)
 
-    with _tmp_3mf(await file.read()) as tmp_path:
+    with _tmp_3mf(await _read_upload(file)) as tmp_path:
         mesh_list = parse_3mf(tmp_path)
 
     if not mesh_list:
@@ -85,10 +130,24 @@ async def split(
     rot_y: float = Form(0.0),
     rot_z: float = Form(0.0),
     rot_w: float = Form(1.0),
+    # Manual pre-split selection from the viewer's selection step: JSON
+    # {"<object_id>": [{"label": str, "face_indices": [int, ...], "color_hex": str}]}.
+    # Omitted/empty -> unchanged automatic per-color split (back-compat with
+    # the CLI and any older client).
+    selection: Optional[str] = Form(None),
 ):
-    """Split a .3mf file by face color and return a ZIP of STL parts."""
+    """Split a .3mf file and return a ZIP of STL parts.
+
+    Without *selection*: automatic per-color split (original behavior).
+    With *selection*: split only at the user-chosen face groups; every
+    face not claimed by a group stays together as one "rest" part.
+    """
     _require_3mf(file.filename)
     n_connectors = max(1, min(n_connectors, 10))
+
+    selection_groups: Optional[Dict[str, List[dict]]] = None
+    if selection:
+        selection_groups = _parse_selection(selection)
 
     try:
         conn_type = ConnectorType(connector)
@@ -108,7 +167,7 @@ async def split(
                   "depth": max(0.5, dt_depth), "draft_deg": max(0.0, min(45.0, dt_draft_deg)),
                   "clearance": max(0.0, dt_clearance)}
 
-    with _tmp_3mf(await file.read()) as tmp_path:
+    with _tmp_3mf(await _read_upload(file)) as tmp_path:
         mesh_list = parse_3mf(tmp_path)
 
     if not mesh_list:
@@ -118,10 +177,17 @@ async def split(
 
     all_parts = []
     for md in mesh_list:
-        all_parts.extend(split_by_color(md, merge_gap_mm=max(0.0, merge_gap_mm)))
+        if selection_groups is not None:
+            groups = selection_groups.get(md.object_id, [])
+            try:
+                all_parts.extend(split_by_selection(md, groups, merge_gap_mm=max(0.0, merge_gap_mm)))
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+        else:
+            all_parts.extend(split_by_color(md, merge_gap_mm=max(0.0, merge_gap_mm)))
 
     if not all_parts:
-        raise HTTPException(400, "No colored parts could be extracted")
+        raise HTTPException(400, "No parts could be extracted")
 
     if conn_type != ConnectorType.NONE:
         all_parts = apply_connectors(all_parts, conn_type, n_connectors, params)
@@ -205,6 +271,13 @@ async def debug_3mf(file: UploadFile = File(...)):
 def _require_3mf(filename: Optional[str]) -> None:
     if not filename or not filename.lower().endswith('.3mf'):
         raise HTTPException(400, "Only .3mf files are supported")
+
+
+async def _read_upload(file: UploadFile) -> bytes:
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_MB * 1024 * 1024:
+        raise HTTPException(413, f"File exceeds MAX_UPLOAD_MB limit ({MAX_UPLOAD_MB:g} MB)")
+    return data
 
 
 class _tmp_3mf:

@@ -27,7 +27,7 @@ try:
 except ImportError:
     _HAS_PYMESHFIX = False
 
-from .parser import MeshData
+from .parser import MeshData, _hex_to_rgba
 
 RGBA = Tuple[int, int, int, int]
 
@@ -150,6 +150,84 @@ class ColorPart:
     name: str
 
 
+def _faces_to_solids(
+    mesh_data: MeshData,
+    face_indices: List[int],
+    merge_gap_mm: float,
+) -> List[trimesh.Trimesh]:
+    """Turn an arbitrary set of *mesh_data* face indices into one or more
+    watertight solids: the sub-mesh they form is split into raw connected
+    islands, each island is solidified, islands within *merge_gap_mm* of
+    each other are fused into one physical piece via a real boolean union
+    (falling back to a repaired concatenation if that union fails -- see
+    module docstring), and each resulting cluster becomes one solid.
+
+    Shared by split_by_color (groups faces by paint color) and
+    split_by_selection (groups faces by explicit user choice) so the mesh
+    repair logic only has to be gotten right once.
+    """
+    # Defensive dedup: duplicate indices would otherwise add doubled,
+    # coincident triangles (process=False skips trimesh's own merge),
+    # which can spuriously break is_watertight and trigger needless repair.
+    face_indices = list(dict.fromkeys(face_indices))
+    face_idx_arr = np.array(face_indices, dtype=np.int32)
+    selected_faces = mesh_data.faces[face_idx_arr]
+
+    unique_verts, inverse = np.unique(selected_faces.flatten(), return_inverse=True)
+    new_vertices = mesh_data.vertices[unique_verts].astype(np.float64)
+    new_faces = inverse.reshape(-1, 3)
+    sub_mesh = trimesh.Trimesh(vertices=new_vertices, faces=new_faces, process=False)
+
+    raw_islands = [f for f in sub_mesh.split(only_watertight=False)
+                   if len(f.faces) >= MIN_FRAGMENT_FACES]
+    islands = [r for r in (_solidify_island(isl) for isl in raw_islands) if r is not None]
+    if not islands:
+        return []
+
+    clusters = (_cluster_by_proximity(islands, merge_gap_mm)
+                if len(islands) > 1 else [[0]])
+
+    solids: List[trimesh.Trimesh] = []
+    for idxs in clusters:
+        # Islands are already individually watertight solids -- fuse
+        # them with a real boolean union into one coherent body.
+        # Plain concatenation leaves each island as its own separate,
+        # overlapping shell inside the same file: some slicers (Prusa)
+        # tolerate that, but Cura/Creality treat it as a non-manifold
+        # compound object and disable tools like "place on face", and
+        # the overlaps show up as double interior walls.
+        cluster_islands = [islands[i] for i in idxs]
+        merged = cluster_islands[0]
+        if len(cluster_islands) > 1:
+            fell_back = False
+            try:
+                unioned = trimesh.boolean.union(cluster_islands, engine='manifold')
+                if unioned is not None and len(unioned.faces) > 0:
+                    merged = unioned
+                else:
+                    merged = trimesh.util.concatenate(cluster_islands)
+                    fell_back = True
+            except Exception:
+                merged = trimesh.util.concatenate(cluster_islands)
+                fell_back = True
+
+            # The concatenate fallback stacks each island as its own
+            # overlapping shell instead of one solid -- slicers treat
+            # that as non-manifold. Repair it the same way a single
+            # island's stitched wall gets repaired in _solidify_island.
+            if fell_back and not merged.is_watertight and _HAS_PYMESHFIX:
+                try:
+                    mf = pymeshfix.MeshFix(merged.vertices, merged.faces)
+                    mf.repair(remove_smallest_components=False)
+                    if len(mf.faces) >= MIN_FRAGMENT_FACES:
+                        merged = trimesh.Trimesh(vertices=mf.points, faces=mf.faces, process=False)
+                except Exception:
+                    pass
+        if len(merged.faces) >= MIN_FRAGMENT_FACES:
+            solids.append(merged)
+    return solids
+
+
 def split_by_color(
     mesh_data: MeshData,
     merge_gap_mm: float = DEFAULT_MERGE_GAP_MM,
@@ -172,48 +250,10 @@ def split_by_color(
     parts: List[ColorPart] = []
 
     for color, face_indices in color_to_faces.items():
-        face_idx_arr = np.array(face_indices, dtype=np.int32)
-        selected_faces = mesh_data.faces[face_idx_arr]
-
-        unique_verts, inverse = np.unique(selected_faces.flatten(), return_inverse=True)
-        new_vertices = mesh_data.vertices[unique_verts].astype(np.float64)
-        new_faces = inverse.reshape(-1, 3)
-        color_mesh = trimesh.Trimesh(vertices=new_vertices, faces=new_faces, process=False)
-
-        raw_islands = [f for f in color_mesh.split(only_watertight=False)
-                       if len(f.faces) >= MIN_FRAGMENT_FACES]
-        islands = [r for r in (_solidify_island(isl) for isl in raw_islands) if r is not None]
-        if not islands:
-            continue
-
-        clusters = (_cluster_by_proximity(islands, merge_gap_mm)
-                    if len(islands) > 1 else [[0]])
-
         r, g, b, a = color
         hex_color = f"#{r:02x}{g:02x}{b:02x}"
 
-        for idxs in clusters:
-            # Islands are already individually watertight solids -- fuse
-            # them with a real boolean union into one coherent body.
-            # Plain concatenation leaves each island as its own separate,
-            # overlapping shell inside the same file: some slicers (Prusa)
-            # tolerate that, but Cura/Creality treat it as a non-manifold
-            # compound object and disable tools like "place on face", and
-            # the overlaps show up as double interior walls.
-            cluster_islands = [islands[i] for i in idxs]
-            merged = cluster_islands[0]
-            if len(cluster_islands) > 1:
-                try:
-                    unioned = trimesh.boolean.union(cluster_islands, engine='manifold')
-                    if unioned is not None and len(unioned.faces) > 0:
-                        merged = unioned
-                    else:
-                        merged = trimesh.util.concatenate(cluster_islands)
-                except Exception:
-                    merged = trimesh.util.concatenate(cluster_islands)
-            if len(merged.faces) < MIN_FRAGMENT_FACES:
-                continue
-
+        for merged in _faces_to_solids(mesh_data, face_indices, merge_gap_mm):
             n = color_counts.get(hex_color, 0)
             color_counts[hex_color] = n + 1
             suffix = "" if n == 0 else f"_{n + 1}"
@@ -226,5 +266,69 @@ def split_by_color(
             ))
 
     # Sort by face count descending so the largest part is first
+    parts.sort(key=lambda p: len(p.mesh.faces), reverse=True)
+    return parts
+
+
+def split_by_selection(
+    mesh_data: MeshData,
+    groups: List[dict],
+    merge_gap_mm: float = DEFAULT_MERGE_GAP_MM,
+) -> List[ColorPart]:
+    """Split mesh_data using explicit, user-chosen face groups instead of
+    automatic per-color grouping -- color boundaries in a model don't
+    always make sensible assembly boundaries (e.g. a paint region can cut
+    straight through a mating surface), so the caller picks which faces
+    belong together instead of every color edge becoming a cut.
+
+    Each entry in *groups* is {"label": str, "face_indices": [int, ...],
+    "color_hex": Optional[str]}. Faces not claimed by any group become one
+    implicit "rest" part covering the remainder of mesh_data, so nothing
+    from the original model is ever silently dropped.
+
+    Raises ValueError if two groups claim the same face -- silently letting
+    that through would duplicate volume across two exported parts, which is
+    exactly the "doesn't fit back together" problem this whole feature
+    exists to avoid.
+    """
+    total_faces = len(mesh_data.faces)
+    claimed: dict = {}  # face index -> label of the group that claimed it
+    name_counts: dict = {}
+    parts: List[ColorPart] = []
+
+    def _add_parts(face_indices: List[int], label: str, color_hex: str) -> None:
+        color = _hex_to_rgba(color_hex)
+        for merged in _faces_to_solids(mesh_data, face_indices, merge_gap_mm):
+            n = name_counts.get(label, 0)
+            name_counts[label] = n + 1
+            suffix = "" if n == 0 else f"_{n + 1}"
+            parts.append(ColorPart(
+                mesh=merged,
+                color=color,
+                color_hex=color_hex,
+                name=f"{mesh_data.name}_{label}{suffix}",
+            ))
+
+    for group in groups:
+        face_indices = list(dict.fromkeys(
+            i for i in group.get("face_indices", []) if 0 <= i < total_faces
+        ))
+        if not face_indices:
+            continue
+        label = group.get("label") or f"teil_{len(parts) + 1}"
+        for i in face_indices:
+            if i in claimed:
+                raise ValueError(
+                    f"face {i} is selected in both '{claimed[i]}' and '{label}' "
+                    "-- selection groups must not overlap"
+                )
+            claimed[i] = label
+        color_hex = group.get("color_hex") or "#808080"
+        _add_parts(face_indices, label, color_hex)
+
+    rest_indices = [i for i in range(total_faces) if i not in claimed]
+    if rest_indices:
+        _add_parts(rest_indices, "rest", "#808080")
+
     parts.sort(key=lambda p: len(p.mesh.faces), reverse=True)
     return parts
