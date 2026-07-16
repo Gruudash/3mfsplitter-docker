@@ -45,6 +45,23 @@ DEFAULT_MERGE_GAP_MM = 2.0
 # printable solid -- a few FDM perimeters' worth.
 SHELL_THICKNESS_MM = 1.2
 
+# Raw islands whose bounding-box diagonal is under this (mm) are dropped
+# before solidifying/clustering -- sub-millimetre paint-detail specks that
+# a) can't be printed as a meaningful standalone part and b) are exactly
+# the fragments that were most likely to fail to fuse into their cluster's
+# body and turn into unusable single-triangle-scale output files. Skipping
+# them leaves a negligible, unresolvable-at-nozzle-scale pit in the
+# assembled model instead of dozens of junk STL files.
+MIN_STANDALONE_SIZE_MM = 1.5
+
+# Solidified islands with less volume than this (mm^3) are dropped too --
+# a thin sliver can pass the bounding-box check above (large footprint,
+# near-zero volume, e.g. a hairline paint edge) yet still be geometrically
+# negligible. Chosen well below real fragments: on the reference Blastoise
+# test file, genuine small parts start around 50mm^3 while paint-detail
+# slivers top out under 0.5mm^3 -- a clean, wide gap.
+MIN_STANDALONE_VOLUME_MM3 = 5.0
+
 
 def _solidify_island(island: trimesh.Trimesh, thickness: float = SHELL_THICKNESS_MM) -> Optional[trimesh.Trimesh]:
     """Turn a single connected mesh island into a watertight solid.
@@ -150,10 +167,46 @@ class ColorPart:
     name: str
 
 
+def _fully_enclosed(mesh: trimesh.Trimesh, full_shape: trimesh.Trimesh) -> bool:
+    """True if *mesh* is entirely buried inside *full_shape* -- e.g. a
+    color region that sits in a cavity/undercut of the model, or leftover
+    internal geometry -- and would never be visible after assembly (any
+    gap around it gets filled by a neighbouring part's infill anyway).
+
+    Checked at two very different probe distances (a hair off the surface,
+    and a couple of millimetres off): a probe just barely outside the
+    mesh's own wall mostly tests "does a neighbouring part's material
+    start immediately here" (true for any ordinary seam between two
+    touching parts, so this alone reads as ~50% hidden even for obviously
+    visible geometry), while a probe several mm out is thrown off by the
+    model's own overall curvature (a legitimate, fully visible bulge can
+    still read as mostly "inside" the model's silhouette at that range).
+    Requiring near-total containment at *both* scales is what actually
+    isolates "has no exposed surface at all", not "has a normal seam" or
+    "sits on a curved surface".
+    """
+    n_faces = len(mesh.faces)
+    if n_faces == 0:
+        return False
+    sample_idx = (np.arange(n_faces) if n_faces <= 200
+                  else np.random.choice(n_faces, 200, replace=False))
+    centroids = mesh.triangles_center[sample_idx]
+    normals = mesh.face_normals[sample_idx]
+    try:
+        for probe_mm in (0.05, 2.0):
+            probe = centroids + normals * probe_mm
+            if full_shape.contains(probe).mean() < 0.95:
+                return False
+        return True
+    except Exception:
+        return False
+
+
 def _faces_to_solids(
     mesh_data: MeshData,
     face_indices: List[int],
     merge_gap_mm: float,
+    full_shape: Optional[trimesh.Trimesh] = None,
 ) -> List[trimesh.Trimesh]:
     """Turn an arbitrary set of *mesh_data* face indices into one or more
     watertight solids: the sub-mesh they form is split into raw connected
@@ -161,6 +214,9 @@ def _faces_to_solids(
     each other are fused into one physical piece via a real boolean union
     (falling back to a repaired concatenation if that union fails -- see
     module docstring), and each resulting cluster becomes one solid.
+    Solids left fully enclosed inside *full_shape* (see _fully_enclosed)
+    are dropped -- never visible, would just get buried under a
+    neighbouring part's infill.
 
     Shared by split_by_color (groups faces by paint color) and
     split_by_selection (groups faces by explicit user choice) so the mesh
@@ -179,8 +235,11 @@ def _faces_to_solids(
     sub_mesh = trimesh.Trimesh(vertices=new_vertices, faces=new_faces, process=False)
 
     raw_islands = [f for f in sub_mesh.split(only_watertight=False)
-                   if len(f.faces) >= MIN_FRAGMENT_FACES]
-    islands = [r for r in (_solidify_island(isl) for isl in raw_islands) if r is not None]
+                   if len(f.faces) >= MIN_FRAGMENT_FACES
+                   and float(np.linalg.norm(f.bounds[1] - f.bounds[0])) >= MIN_STANDALONE_SIZE_MM]
+    solidified = [_solidify_island(isl) for isl in raw_islands]
+    islands = [r for r in solidified
+               if r is not None and r.volume >= MIN_STANDALONE_VOLUME_MM3]
     if not islands:
         return []
 
@@ -189,43 +248,106 @@ def _faces_to_solids(
 
     solids: List[trimesh.Trimesh] = []
     for idxs in clusters:
-        # Islands are already individually watertight solids -- fuse
-        # them with a real boolean union into one coherent body.
-        # Plain concatenation leaves each island as its own separate,
-        # overlapping shell inside the same file: some slicers (Prusa)
-        # tolerate that, but Cura/Creality treat it as a non-manifold
-        # compound object and disable tools like "place on face", and
-        # the overlaps show up as double interior walls.
         cluster_islands = [islands[i] for i in idxs]
-        merged = cluster_islands[0]
         if len(cluster_islands) > 1:
-            fell_back = False
+            # Try the fast path first: manifold3d's own N-way union handles
+            # chains/multi-touching clusters more gracefully in one shot
+            # than sequential pairwise unions do (less precision loss from
+            # repeatedly re-triangulating the growing body), so it produces
+            # fewer, cleaner parts whenever it actually succeeds. Only fall
+            # back to the slower incremental merge -- which guarantees a
+            # mechanically valid (single-body, non-overlapping) result even
+            # for heavily fragmented clusters where the N-way call fails
+            # outright -- when it doesn't.
+            unioned = None
             try:
                 unioned = trimesh.boolean.union(cluster_islands, engine='manifold')
-                if unioned is not None and len(unioned.faces) > 0:
-                    merged = unioned
-                else:
-                    merged = trimesh.util.concatenate(cluster_islands)
-                    fell_back = True
             except Exception:
-                merged = trimesh.util.concatenate(cluster_islands)
-                fell_back = True
+                pass
+            if (unioned is not None and len(unioned.faces) > 0
+                    and unioned.is_watertight and unioned.body_count == 1):
+                solids.append(unioned)
+            else:
+                solids.extend(_union_cluster_incrementally(cluster_islands))
+        else:
+            merged = cluster_islands[0]
+            if len(merged.faces) >= MIN_FRAGMENT_FACES:
+                solids.append(merged)
 
-            # The concatenate fallback stacks each island as its own
-            # overlapping shell instead of one solid -- slicers treat
-            # that as non-manifold. Repair it the same way a single
-            # island's stitched wall gets repaired in _solidify_island.
-            if fell_back and not merged.is_watertight and _HAS_PYMESHFIX:
-                try:
-                    mf = pymeshfix.MeshFix(merged.vertices, merged.faces)
-                    mf.repair(remove_smallest_components=False)
-                    if len(mf.faces) >= MIN_FRAGMENT_FACES:
-                        merged = trimesh.Trimesh(vertices=mf.points, faces=mf.faces, process=False)
-                except Exception:
-                    pass
-        if len(merged.faces) >= MIN_FRAGMENT_FACES:
-            solids.append(merged)
+    if full_shape is not None:
+        solids = [s for s in solids if not _fully_enclosed(s, full_shape)]
     return solids
+
+
+def _union_cluster_incrementally(cluster_islands: List[trimesh.Trimesh]) -> List[trimesh.Trimesh]:
+    """Fuse a proximity cluster into as few solids as possible via
+    incremental pairwise union (largest island first) instead of one
+    all-or-nothing N-way union.
+
+    A single boolean.union() call over a large cluster (e.g. 47 transitively
+    chained islands on a heavily fragmented color) fails outright far more
+    often than a pairwise union of two solids does. The previous fallback
+    for that failure -- plain concatenation, optionally patched by
+    pymeshfix -- produces one STL containing several disconnected,
+    overlapping bodies: technically one file, but not one printable/
+    assemblable solid, and pymeshfix's global repair pass on a large
+    multi-component mesh has separately been observed to melt real
+    geometry (see module docstring).
+
+    Growing the body one island at a time and keeping whatever fails to
+    fuse cleanly as its own separate part guarantees every returned solid
+    is itself a single, watertight, non-overlapping body -- mechanically
+    fine to assemble even if it means exporting the same color as more
+    than one physical piece.
+    """
+    remaining = sorted(cluster_islands, key=lambda m: len(m.faces), reverse=True)
+    solids: List[trimesh.Trimesh] = []
+    current = remaining.pop(0)
+    while remaining:
+        still_separate: List[trimesh.Trimesh] = []
+        merged_any = False
+        for island in remaining:
+            candidate = None
+            try:
+                candidate = trimesh.boolean.union([current, island], engine='manifold')
+            except Exception:
+                pass
+            # body_count == 1 is the real success criterion, not
+            # is_watertight: unioning two solids that don't actually
+            # touch/overlap still returns a per-edge-manifold (so
+            # "watertight") result -- it just concatenates them as two
+            # separate bodies in one mesh, which is exactly the non-fused,
+            # non-assemblable output this is meant to avoid.
+            if (candidate is not None and len(candidate.faces) > 0
+                    and candidate.is_watertight and candidate.body_count == 1):
+                current = candidate
+                merged_any = True
+            else:
+                still_separate.append(island)
+        if not merged_any:
+            # Nothing left in this round touches `current` directly -- it's
+            # done growing. The leftovers may still be transitively
+            # connected to *each other* (a chain current missed because it
+            # only touches one link), so start a fresh accumulator from
+            # the largest leftover and keep going instead of giving up.
+            if len(current.faces) >= MIN_FRAGMENT_FACES:
+                solids.append(current)
+            current = still_separate.pop(0)
+        remaining = still_separate
+    if len(current.faces) >= MIN_FRAGMENT_FACES:
+        solids.append(current)
+    return solids
+
+
+def _build_full_shape(mesh_data: MeshData) -> Optional[trimesh.Trimesh]:
+    """The complete, unsplit model (all colors together) -- used as the
+    ground truth for _fully_enclosed's "is there open air right outside
+    this part" containment check. Only useful if it's itself watertight
+    (contains() is unreliable otherwise), which is expected since this is
+    the model as originally authored, before any color-based cutting.
+    """
+    full_shape = trimesh.Trimesh(vertices=mesh_data.vertices, faces=mesh_data.faces, process=False)
+    return full_shape if full_shape.is_watertight else None
 
 
 def split_by_color(
@@ -248,12 +370,13 @@ def split_by_color(
 
     color_counts: dict = {}
     parts: List[ColorPart] = []
+    full_shape = _build_full_shape(mesh_data)
 
     for color, face_indices in color_to_faces.items():
         r, g, b, a = color
         hex_color = f"#{r:02x}{g:02x}{b:02x}"
 
-        for merged in _faces_to_solids(mesh_data, face_indices, merge_gap_mm):
+        for merged in _faces_to_solids(mesh_data, face_indices, merge_gap_mm, full_shape):
             n = color_counts.get(hex_color, 0)
             color_counts[hex_color] = n + 1
             suffix = "" if n == 0 else f"_{n + 1}"
